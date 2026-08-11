@@ -150,6 +150,12 @@ services:
     container_name: sdp-product-service
     ports:
       - "8082:8082"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/product_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
     depends_on:
       postgres:
         condition: service_healthy

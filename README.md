@@ -77,7 +77,10 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 - [x] **Phase 2 — User service**: registration, JWT login, BCrypt password hashing,
       role-based + ownership-based endpoint authorization, address book CRUD, Flyway
       schema, unit + Testcontainers integration tests.
-- [ ] Phase 3 — Product service (catalog, search, Redis cache)
+- [x] **Phase 3 — Product service**: category + product CRUD (ADMIN-only writes,
+      publicly browsable reads), pagination/sorting/category/price/text-search
+      filtering, Redis-backed product cache with write-through invalidation, unit +
+      Testcontainers (Postgres + Redis) integration tests.
 - [ ] Phase 4 — Inventory service (reservation, optimistic locking)
 - [ ] Phase 5 — Order service (state machine, idempotency)
 - [ ] Phase 6 — Kafka event contracts & producers/consumers
@@ -90,10 +93,10 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-`user-service` now has real business logic end to end (registration, JWT auth,
-authorization, addresses); the remaining services are still minimal Spring Boot
-applications exposing only `/actuator/health`, `/actuator/info`, and
-`/actuator/metrics`, built in the same incremental way once their phase starts.
+`user-service` and `product-service` now have real business logic end to end; the
+remaining services are still minimal Spring Boot applications exposing only
+`/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built in the same
+incremental way once their phase starts.
 
 ## License
 
