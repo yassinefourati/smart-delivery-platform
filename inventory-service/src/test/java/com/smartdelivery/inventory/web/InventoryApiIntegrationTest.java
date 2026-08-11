@@ -3,10 +3,18 @@ package com.smartdelivery.inventory.web;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdelivery.inventory.domain.Inventory;
 import com.smartdelivery.inventory.domain.Warehouse;
+import com.smartdelivery.inventory.event.EventEnvelope;
+import com.smartdelivery.inventory.event.KafkaTopics;
 import com.smartdelivery.inventory.repository.InventoryRepository;
 import com.smartdelivery.inventory.repository.WarehouseRepository;
 import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
+import org.apache.kafka.clients.consumer.ConsumerConfig;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -18,13 +26,17 @@ import org.springframework.test.web.servlet.MockMvc;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
+import org.testcontainers.kafka.KafkaContainer;
+import org.testcontainers.utility.DockerImageName;
 
 import javax.crypto.SecretKey;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.Date;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CyclicBarrier;
@@ -55,11 +67,15 @@ class InventoryApiIntegrationTest {
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
 
+    @Container
+    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.7.1"));
+
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
+        registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
         registry.add("jwt.secret", () -> JWT_SECRET);
     }
 
@@ -100,6 +116,37 @@ class InventoryApiIntegrationTest {
 
     private Inventory persistInventory(Warehouse warehouse, UUID productId, int availableQuantity) {
         return inventoryRepository.save(new Inventory(productId, warehouse, availableQuantity));
+    }
+
+    private KafkaConsumer<String, String> testConsumer;
+
+    @BeforeEach
+    void setUpConsumer() {
+        Properties props = new Properties();
+        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, kafka.getBootstrapServers());
+        props.put(ConsumerConfig.GROUP_ID_CONFIG, "test-probe-" + UUID.randomUUID());
+        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, StringDeserializer.class.getName());
+        testConsumer = new KafkaConsumer<>(props);
+    }
+
+    @AfterEach
+    void tearDownConsumer() {
+        testConsumer.close();
+    }
+
+    private ConsumerRecord<String, String> consumeOne(String topic, Duration timeout) {
+        testConsumer.subscribe(List.of(topic));
+        long deadline = System.currentTimeMillis() + timeout.toMillis();
+        while (System.currentTimeMillis() < deadline) {
+            var records = testConsumer.poll(Duration.ofMillis(500));
+            var iterator = records.iterator();
+            if (iterator.hasNext()) {
+                return iterator.next();
+            }
+        }
+        throw new AssertionError("No message consumed from topic '%s' within %s".formatted(topic, timeout));
     }
 
     @Test
@@ -349,5 +396,36 @@ class InventoryApiIntegrationTest {
         } finally {
             executor.shutdown();
         }
+    }
+
+    @Test
+    void successfulReservationPublishesInventoryReservedToKafka() throws Exception {
+        Warehouse warehouse = persistWarehouse("WH-" + UUID.randomUUID());
+        UUID productId = UUID.randomUUID();
+        persistInventory(warehouse, productId, 10);
+        UUID orderId = UUID.randomUUID();
+
+        reserve(orderId, productId, 3, warehouseManagerToken()).andExpect(status().isCreated());
+
+        var record = consumeOne(KafkaTopics.INVENTORY_RESERVED, Duration.ofSeconds(15));
+        var envelope = objectMapper.readValue(record.value(), EventEnvelope.class);
+        assertThat(envelope.eventType()).isEqualTo("InventoryReserved");
+        assertThat(envelope.payload().get("orderId").asText()).isEqualTo(orderId.toString());
+        assertThat(envelope.payload().get("quantity").asInt()).isEqualTo(3);
+    }
+
+    @Test
+    void insufficientStockPublishesInventoryFailedToKafka() throws Exception {
+        Warehouse warehouse = persistWarehouse("WH-" + UUID.randomUUID());
+        UUID productId = UUID.randomUUID();
+        persistInventory(warehouse, productId, 1);
+        UUID orderId = UUID.randomUUID();
+
+        reserve(orderId, productId, 5, warehouseManagerToken()).andExpect(status().isConflict());
+
+        var record = consumeOne(KafkaTopics.INVENTORY_FAILED, Duration.ofSeconds(15));
+        var envelope = objectMapper.readValue(record.value(), EventEnvelope.class);
+        assertThat(envelope.eventType()).isEqualTo("InventoryFailed");
+        assertThat(envelope.payload().get("orderId").asText()).isEqualTo(orderId.toString());
     }
 }

@@ -92,7 +92,14 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       request-fingerprint mismatch detection, ownership-enforced read/cancel/list
       APIs, unit + Testcontainers integration tests. Saga wiring that actually
       drives an order past `CREATED` lands in Phases 6-7.
-- [ ] Phase 6 — Kafka event contracts & producers/consumers
+- [x] **Phase 6 — Kafka**: shared JSON envelope contract (independently duplicated per
+      service, not a shared library -- plain-string (de)serialization to avoid
+      cross-service Java type-header coupling), real producers (order-service:
+      created/cancelled; inventory-service: reserved/released/failed) and a real
+      consumer (order-service reacting to inventory/payment/shipment/delivery events
+      by idempotently advancing its own state machine), bounded retry + dead-letter
+      topics. Direct `KafkaTemplate.send()` for now, not yet the outbox pattern --
+      flagged, fixed in Phase 8.
 - [ ] Phase 7 — Saga orchestration (order → inventory → payment → shipment)
 - [ ] Phase 8 — Transactional outbox
 - [ ] Phase 9 — Delivery service
@@ -103,9 +110,9 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 - [ ] Phase 14 — CI/CD
 
 `user-service`, `product-service`, `inventory-service`, and `order-service` now have
-real business logic end to end; the remaining services are still minimal Spring Boot
-applications
-exposing only
+real business logic end to end, and order-service/inventory-service talk to each other
+asynchronously over Kafka (not just REST); the remaining services are still minimal
+Spring Boot applications exposing only
 `/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built in the same
 incremental way once their phase starts.
 

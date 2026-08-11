@@ -1,0 +1,29 @@
+package com.smartdelivery.order.event;
+
+import com.fasterxml.jackson.databind.JsonNode;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * The wire-format contract documented in docs/kafka-events.md. Every service that
+ * publishes or consumes events defines its own local copy of this envelope rather
+ * than sharing a Java class across services -- see docs/architecture.md on why this
+ * codebase has no shared domain module. What has to agree between producer and
+ * consumer is the JSON shape, not a Java type.
+ *
+ * {@code payload} is a raw {@link JsonNode}, not a generic type parameter: Spring
+ * Kafka's default JSON (de)serializer support for generics relies on a "__TypeId__"
+ * header naming the producer's own Java class, which does not exist on a different
+ * service's classpath. See OrderEventPublisher / OrderSagaEventListener.
+ */
+public record EventEnvelope(
+        UUID eventId,
+        String eventType,
+        int eventVersion,
+        Instant timestamp,
+        UUID correlationId,
+        String source,
+        JsonNode payload
+) {
+}

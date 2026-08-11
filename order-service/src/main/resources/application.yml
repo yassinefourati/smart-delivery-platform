@@ -16,6 +16,22 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # Producer/consumer values are plain JSON strings, not Java-type-headered objects --
+    # see docs/kafka-events.md and OrderEventPublisher/OrderSagaEventListener. This
+    # avoids the classic Spring Kafka pitfall of a consumer needing the producer's exact
+    # (service-local, differently-packaged) Java class on its classpath.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
+    consumer:
+      group-id: order-service
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      auto-offset-reset: earliest
+      enable-auto-commit: false
 
 server:
   port: 8084

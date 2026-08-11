@@ -3,6 +3,7 @@ package com.smartdelivery.inventory.service;
 import com.smartdelivery.inventory.domain.Inventory;
 import com.smartdelivery.inventory.domain.InventoryReservation;
 import com.smartdelivery.inventory.domain.Warehouse;
+import com.smartdelivery.inventory.event.InventoryEventPublisher;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -24,8 +25,11 @@ class InventoryReservationServiceTest {
     @Mock
     private InventoryReservationOperations operations;
 
+    @Mock
+    private InventoryEventPublisher eventPublisher;
+
     private InventoryReservationService service() {
-        return new InventoryReservationService(operations);
+        return new InventoryReservationService(operations, eventPublisher);
     }
 
     private InventoryReservation reservation() {

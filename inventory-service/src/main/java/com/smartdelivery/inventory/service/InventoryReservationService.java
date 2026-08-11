@@ -1,6 +1,11 @@
 package com.smartdelivery.inventory.service;
 
 import com.smartdelivery.inventory.domain.InventoryReservation;
+import com.smartdelivery.inventory.event.InventoryEventPublisher;
+import com.smartdelivery.inventory.event.InventoryFailedPayload;
+import com.smartdelivery.inventory.event.InventoryReleasedPayload;
+import com.smartdelivery.inventory.event.InventoryReservedPayload;
+import com.smartdelivery.inventory.exception.InsufficientStockException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
@@ -30,17 +35,37 @@ public class InventoryReservationService {
     private static final int MAX_ATTEMPTS = 5;
 
     private final InventoryReservationOperations operations;
+    private final InventoryEventPublisher eventPublisher;
 
-    public InventoryReservationService(InventoryReservationOperations operations) {
+    public InventoryReservationService(InventoryReservationOperations operations, InventoryEventPublisher eventPublisher) {
         this.operations = operations;
+        this.eventPublisher = eventPublisher;
     }
 
+    /**
+     * Publishes are called only after {@code withRetry} has already returned
+     * successfully (reserve/release) or the retry attempts have been fully exhausted
+     * with a real {@link InsufficientStockException} (not a lock conflict -- see
+     * {@code withRetry}), i.e. after the owning transaction has already committed.
+     * See InventoryEventPublisher's Javadoc for the pre-outbox caveat this still
+     * carries.
+     */
     public InventoryReservation reserve(UUID orderId, UUID productId, int quantity) {
-        return withRetry("reserve", orderId, productId, () -> operations.reserveAttempt(orderId, productId, quantity));
+        try {
+            InventoryReservation reservation = withRetry("reserve", orderId, productId,
+                    () -> operations.reserveAttempt(orderId, productId, quantity));
+            eventPublisher.publishReserved(new InventoryReservedPayload(reservation.getId(), orderId, productId, quantity));
+            return reservation;
+        } catch (InsufficientStockException e) {
+            eventPublisher.publishFailed(new InventoryFailedPayload(orderId, productId, quantity, e.getMessage()));
+            throw e;
+        }
     }
 
     public InventoryReservation release(UUID orderId, UUID productId) {
-        return withRetry("release", orderId, productId, () -> operations.releaseAttempt(orderId, productId));
+        InventoryReservation reservation = withRetry("release", orderId, productId, () -> operations.releaseAttempt(orderId, productId));
+        eventPublisher.publishReleased(new InventoryReleasedPayload(reservation.getId(), orderId, productId, reservation.getQuantity()));
+        return reservation;
     }
 
     public InventoryReservation deduct(UUID orderId, UUID productId) {
