@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: delivery-service
+
+server:
+  port: 8086
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: delivery-service
+    description: Shipment and delivery agent management service

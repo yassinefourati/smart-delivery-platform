@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: order-service
+
+server:
+  port: 8084
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: order-service
+    description: Order lifecycle and Saga orchestration service
