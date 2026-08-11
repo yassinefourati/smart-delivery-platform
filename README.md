@@ -61,6 +61,7 @@ mvn clean install
 - [Service boundaries & communication rules](docs/service-boundaries.md)
 - [Order flow](docs/order-flow.md)
 - [Saga pattern](docs/saga.md)
+- [Resilience](docs/resilience.md)
 - [Kafka event catalog](docs/kafka-events.md)
 - [Database design](docs/database-design.md)
 - [Security](docs/security.md)
@@ -141,7 +142,26 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       through an envelope's untyped `JsonNode` payload doesn't reliably keep its original
       scale, so rendering one for a human now always uses explicit `%.2f` formatting
       instead of the value's own (unreliable) `toString()` -- see docs/kafka-events.md.
-- [ ] Phase 11 — Resilience4j (circuit breaker, retry, bulkhead, rate limiter)
+- [x] **Phase 11 — Resilience4j**: circuit breaker, retry, bulkhead, and rate limiter on
+      order-service's three synchronous REST clients (`ProductServiceClient`,
+      `InventoryServiceClient`, `PaymentServiceClient`) -- the only service in the
+      platform that makes a synchronous call to another service. One
+      breaker/bulkhead/limiter instance per downstream, shared across all of that
+      downstream's operations. `InsufficientStockException` (a 409, a real business
+      outcome) is explicitly exempted from the `inventory-service` breaker and retry so
+      a routine "no stock" answer never trips resilience machinery meant for actual
+      outages -- see docs/resilience.md. No fallback methods: the saga's calls
+      propagate any Resilience4j rejection into Spring Kafka's existing retry/DLT
+      handling exactly like any other infrastructure failure (saga resumability,
+      untouched); the synchronous product-service call maps the same rejections to a
+      `503` via `GlobalExceptionHandler`. `ResilienceIntegrationTest` is the one
+      integration test in this codebase that actually runs in this sandbox (no
+      Postgres/Kafka needed) and verifies both directions: repeated business failures
+      never open the circuit, repeated infrastructure failures do. Also found and
+      worked around a real dependency-resolution bug: `resilience4j-spring-boot3`'s
+      nominal latest release pulls in a version-inconsistent `resilience4j-spring6`
+      that fails to boot; pinned to a fully self-consistent `2.2.0` instead, confirmed
+      by that same test actually passing.
 - [ ] Phase 12 — Observability (Prometheus, Grafana, OpenTelemetry, correlation IDs)
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD

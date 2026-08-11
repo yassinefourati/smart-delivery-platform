@@ -1,6 +1,14 @@
 spring:
   application:
     name: order-service
+  http:
+    client:
+      # Bounds how long a single call to product-service/inventory-service/payment-service
+      # can hang before it's treated as a failure -- without this, a stuck TCP connection
+      # can block far longer than any Resilience4j retry/circuit-breaker setting below
+      # would suggest, since none of those can act on a call that hasn't failed yet.
+      connect-timeout: 2s
+      read-timeout: 3s
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/order_db}
     username: ${DB_USERNAME:sdp}
@@ -44,6 +52,9 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+  health:
+    circuitbreakers:
+      enabled: true
   info:
     env:
       enabled: true
@@ -69,6 +80,79 @@ services:
 # How often OutboxPublisher polls outbox_events for PENDING rows -- see ADR 004.
 outbox:
   poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:2000}
+
+# One instance per downstream service order-service calls synchronously (docs/resilience.md)
+# -- every operation against the same downstream (reserve/release/deduct for
+# inventory-service; charge/refund for payment-service) shares one instance, so a
+# problem with that downstream trips one breaker/bulkhead/limiter for all of them, not
+# three independent ones.
+resilience4j:
+  circuitbreaker:
+    instances:
+      product-service:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 15s
+        permitted-number-of-calls-in-half-open-state: 3
+      inventory-service:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 15s
+        permitted-number-of-calls-in-half-open-state: 3
+        # A 409 (insufficient stock) is a real business outcome, not a sign
+        # inventory-service is unhealthy -- see InventoryServiceClient and
+        # docs/resilience.md. Must not count toward opening the circuit.
+        ignore-exceptions:
+          - com.smartdelivery.order.exception.InsufficientStockException
+      payment-service:
+        sliding-window-size: 10
+        minimum-number-of-calls: 5
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 15s
+        permitted-number-of-calls-in-half-open-state: 3
+  retry:
+    instances:
+      product-service:
+        max-attempts: 3
+        wait-duration: 300ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+      inventory-service:
+        max-attempts: 3
+        wait-duration: 300ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+        ignore-exceptions:
+          - com.smartdelivery.order.exception.InsufficientStockException
+      payment-service:
+        max-attempts: 3
+        wait-duration: 300ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+  bulkhead:
+    instances:
+      product-service:
+        max-concurrent-calls: 20
+      inventory-service:
+        max-concurrent-calls: 20
+      payment-service:
+        max-concurrent-calls: 20
+  ratelimiter:
+    instances:
+      product-service:
+        limit-for-period: 100
+        limit-refresh-period: 1s
+        timeout-duration: 500ms
+      inventory-service:
+        limit-for-period: 100
+        limit-refresh-period: 1s
+        timeout-duration: 500ms
+      payment-service:
+        limit-for-period: 100
+        limit-refresh-period: 1s
+        timeout-duration: 500ms
 
 springdoc:
   swagger-ui:

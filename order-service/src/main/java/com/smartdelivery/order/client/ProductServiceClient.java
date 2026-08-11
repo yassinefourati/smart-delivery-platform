@@ -1,6 +1,10 @@
 package com.smartdelivery.order.client;
 
 import com.smartdelivery.order.exception.ProductServiceUnavailableException;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.github.resilience4j.retry.annotation.Retry;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
@@ -16,10 +20,14 @@ import java.util.UUID;
  * the order at all, unlike the saga steps (reserve inventory, charge payment) that
  * follow order creation and are event-driven (docs/saga.md, wired in Phase 7).
  *
- * No retry/circuit-breaker here yet -- that's formalized platform-wide in the
- * resilience phase (Phase 11). For now, any failure to reach product-service simply
- * fails the order-creation request with a 503 rather than silently proceeding with
- * unpriced or stale data.
+ * A 404 (no such product) is a normal outcome -- {@link Optional#empty()}, not a
+ * failure -- so it's resolved before any exception exists for Resilience4j to see; only
+ * a real connectivity/5xx failure ({@link ProductServiceUnavailableException}) counts
+ * against the {@code product-service} circuit breaker/retry (docs/resilience.md). This
+ * call is on the synchronous order-creation request path (unlike the saga's calls,
+ * which run inside a `@KafkaListener` and can rely on Kafka's own retry), so an open
+ * circuit here surfaces to the client as a `503` (see GlobalExceptionHandler) rather
+ * than a silently-hanging request.
  */
 @Component
 public class ProductServiceClient {
@@ -30,6 +38,10 @@ public class ProductServiceClient {
         this.restClient = restClientBuilder.baseUrl(properties.baseUrl()).build();
     }
 
+    @CircuitBreaker(name = "product-service")
+    @Retry(name = "product-service")
+    @Bulkhead(name = "product-service")
+    @RateLimiter(name = "product-service")
     public Optional<ProductSnapshot> getProduct(UUID productId) {
         try {
             ProductSnapshot snapshot = restClient.get()

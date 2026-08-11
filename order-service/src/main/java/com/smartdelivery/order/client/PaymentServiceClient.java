@@ -1,5 +1,9 @@
 package com.smartdelivery.order.client;
 
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
+import io.github.resilience4j.retry.annotation.Retry;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -17,9 +21,11 @@ import java.util.UUID;
  * payment-service's PaymentController), because "the charge was declined" is a
  * successfully processed payment attempt, not a broken API call. This client
  * reflects that: {@link #charge} returns a result the orchestrator branches on,
- * rather than throwing for the expected decline case. A genuine connectivity/5xx
- * failure still propagates unchanged, for the same Kafka-retry reason documented on
- * InventoryServiceClient.
+ * rather than throwing for the expected decline case -- there is no business
+ * exception to exempt from the {@code payment-service} Resilience4j instance the way
+ * InventoryServiceClient exempts {@code InsufficientStockException}. A genuine
+ * connectivity/5xx failure still propagates unchanged, for the same Kafka-retry reason
+ * documented on InventoryServiceClient (docs/resilience.md).
  */
 @Component
 public class PaymentServiceClient {
@@ -36,6 +42,10 @@ public class PaymentServiceClient {
         this.tokenProvider = tokenProvider;
     }
 
+    @CircuitBreaker(name = "payment-service")
+    @Retry(name = "payment-service")
+    @Bulkhead(name = "payment-service")
+    @RateLimiter(name = "payment-service")
     public PaymentChargeResult charge(UUID orderId, BigDecimal amount) {
         PaymentApiResponse response = restClient.post()
                 .uri("/api/v1/payments")
@@ -49,6 +59,10 @@ public class PaymentServiceClient {
     }
 
     /** Best-effort compensation call -- see OrderSagaOrchestrator. */
+    @CircuitBreaker(name = "payment-service")
+    @Retry(name = "payment-service")
+    @Bulkhead(name = "payment-service")
+    @RateLimiter(name = "payment-service")
     public void refund(UUID orderId) {
         restClient.post()
                 .uri("/api/v1/payments/refund")
