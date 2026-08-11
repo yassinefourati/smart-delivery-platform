@@ -5,6 +5,7 @@ import com.smartdelivery.payment.domain.PaymentStatus;
 import com.smartdelivery.payment.domain.TransactionStatus;
 import com.smartdelivery.payment.dto.ChargeRequest;
 import com.smartdelivery.payment.dto.RefundRequest;
+import com.smartdelivery.payment.event.PaymentEventPublisher;
 import com.smartdelivery.payment.exception.InvalidPaymentStateException;
 import com.smartdelivery.payment.exception.PaymentNotFoundException;
 import com.smartdelivery.payment.provider.ChargeResult;
@@ -36,8 +37,11 @@ class PaymentServiceTest {
     @Mock
     private MockPaymentProvider paymentProvider;
 
+    @Mock
+    private PaymentEventPublisher eventPublisher;
+
     private PaymentService service() {
-        return new PaymentService(paymentRepository, paymentProvider);
+        return new PaymentService(paymentRepository, paymentProvider, eventPublisher);
     }
 
     private Payment paymentWithStatus(UUID orderId, PaymentStatus status) {

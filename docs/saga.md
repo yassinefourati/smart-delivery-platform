@@ -1,10 +1,11 @@
 # Saga Pattern
 
-> Order → Inventory → Payment, plus compensation, was implemented in Phase 7
-> (`OrderSagaOrchestrator`). The Payment → Shipment leg is written and tested in
-> isolation (order-service already consumes `shipment.created`/`delivery.assigned`/
-> `delivery.completed`, since Phase 6) but nothing publishes those yet --
-> delivery-service doesn't exist until Phase 9.
+> Order → Inventory → Payment → Shipment → Delivery is fully wired as of Phase 9.
+> `OrderSagaOrchestrator` (Phase 7) drives Order → Inventory → Payment via direct REST
+> calls; from Payment onward the saga continues purely through Kafka events
+> delivery-service produces (Phase 9) and order-service has consumed since Phase 6 --
+> see [Two paths to the same transition](#two-paths-to-the-same-transition) for why the
+> switch from REST to events at that point is deliberate, not incidental.
 
 ## Why a Saga instead of a distributed transaction
 
@@ -37,15 +38,21 @@ flowchart LR
     A[OrderCreated] --> B[InventoryReserved]
     B --> C[PaymentCompleted]
     C --> D[ShipmentCreated]
-    D --> E[OrderConfirmed]
+    D --> E[DeliveryAssigned]
+    E --> F[DeliveryCompleted]
 ```
 
 `InventoryReserved` and `PaymentCompleted` are real REST calls the orchestrator makes
-today (to inventory-service and payment-service respectively), applied through the
-same idempotent transition methods (`OrderSagaEventHandler`) the Phase 6 Kafka
-consumer already uses — see [Two paths to the same transition](#two-paths-to-the-same-transition)
-below. `ShipmentCreated` and `OrderConfirmed` are not reachable yet: nothing publishes
-`shipment.created` until delivery-service exists (Phase 9).
+(to inventory-service and payment-service respectively), applied through the same
+idempotent transition methods (`OrderSagaEventHandler`) the Phase 6 Kafka consumer
+already uses. From `PaymentCompleted` onward, order-service isn't driving anymore --
+delivery-service reacts to `payment.completed` on its own (`PaymentCompletedListener`)
+to create a `Shipment`, publishes `ShipmentCreated`; an admin assigning a
+`DeliveryAgent` publishes `DeliveryAssigned`; that agent completing it publishes
+`DeliveryCompleted`. order-service just consumes all three, the same way it's consumed
+every other event in this saga since Phase 6 -- see
+[Two paths to the same transition](#two-paths-to-the-same-transition) below for why
+the first half is REST-driven and the second half is purely event-driven, on purpose.
 
 ## Compensating flow
 
@@ -98,6 +105,17 @@ published its event, the Kafka consumer still picks that event up once order-ser
 restarts and advances the order anyway — no separate recovery mechanism needed. See
 `OrderSagaOrchestrator`'s class Javadoc.
 
+This is also why the saga is REST for Order → Inventory → Payment but purely
+event-driven from Payment → Shipment → Delivery onward: order-service *is* the
+orchestrator for the first three steps, so it needs an immediate REST result to decide
+whether to proceed or compensate (see
+[service-boundaries.md](service-boundaries.md#communication-matrix)). Shipment and
+Delivery are not orchestrated at all — delivery-service reacts to `payment.completed`
+and to admin/agent actions entirely on its own, and order-service is just one more
+consumer of the facts it announces, the same relationship notification-service will
+have. There's nothing for order-service to orchestrate there because nothing needs an
+immediate yes/no back from it.
+
 ## Resumability
 
 Every step the orchestrator takes is itself idempotent (reserve/release/deduct keyed
@@ -120,14 +138,23 @@ charge or a duplicate shipment.
 
 ## Relationship to the outbox pattern
 
-**Not yet using the outbox** (Phase 8). `OrderEventPublisher`,
-`InventoryEventPublisher`, and `PaymentEventPublisher` all call `KafkaTemplate.send()`
-directly after their owning transaction has already committed — a flagged, known gap,
-not a silent one. See [ADR 004](adr/004-outbox-pattern.md) for exactly why a bare
-`send()` isn't fully safe (a crash between commit and publish loses the event
-silently), and [kafka-events.md](kafka-events.md#relationship-to-the-outbox-pattern)
-for the same discussion from the Kafka side. The underlying database change is never
-at risk either way — only the event announcing it.
+**Using the outbox everywhere.** `OrderEventPublisher`, `InventoryEventPublisher`, and
+`PaymentEventPublisher` write an `OutboxEvent` row inside the same transaction as the
+business change they announce (order creation/cancellation, a reservation/release, a
+charge outcome), instead of calling `KafkaTemplate.send()` directly -- since Phase 8.
+`DeliveryEventPublisher` does the same since Phase 9, when it was written. A separate
+`OutboxPublisher` per service polls and actually sends to Kafka. This closes the one
+real gap the saga had: a crash between "the reservation committed" (or the shipment
+created, or the delivery assigned) and "the event announcing it reached Kafka" no
+longer loses that event silently -- the row survives the crash and the next poll (or
+the next process's first poll, after restart) sends it. See
+[ADR 004](adr/004-outbox-pattern.md) and
+[kafka-events.md](kafka-events.md#the-outbox-in-practice) for the mechanics.
+
+This doesn't change the saga's resumability story from
+[above](#resumability) -- it strengthens it. Resumability already assumed a step's
+*local* transaction was the unit of truth; the outbox just makes "the event announcing
+that transaction" part of that same unit of truth, instead of a best-effort afterthought.
 
 ## Service-to-service authentication
 

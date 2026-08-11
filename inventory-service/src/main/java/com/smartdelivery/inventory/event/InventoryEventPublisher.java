@@ -3,54 +3,47 @@ package com.smartdelivery.inventory.event;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Publishes inventory-lifecycle facts to Kafka, called after the owning database
- * transaction has already committed (see InventoryReservationOperations).
- *
- * KNOWN GAP, flagged rather than hidden: this is a direct {@code KafkaTemplate.send()},
- * not the transactional outbox pattern ADR 004 describes. If the process crashes
- * between the DB commit and this call actually reaching the broker, the reservation
- * itself is still correct (it already committed) but no event announces it -- other
- * services relying on this event (a future analytics-service, for instance) would
- * silently miss it. Phase 8 replaces this with an outbox write in the same
- * transaction as the reservation change, closing that gap. Until then, a publish
- * failure is logged, not retried or escalated to the caller -- the REST response
- * already reflects a successful, durable reservation regardless of whether the event
- * made it out.
+ * Records inventory-lifecycle facts into the transactional outbox (ADR 004) rather than
+ * sending to Kafka directly. Callers must invoke this from inside the same
+ * {@code @Transactional} method that made the business change it announces (see
+ * {@link com.smartdelivery.inventory.service.InventoryReservationOperations}) -- that's
+ * what makes "the reservation was saved" and "the outbox row announcing it exists"
+ * atomic. The actual Kafka send happens later, out of band, in {@link OutboxPublisher}.
  */
 @Component
 public class InventoryEventPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(InventoryEventPublisher.class);
     private static final String SOURCE = "inventory-service";
+    private static final String AGGREGATE_TYPE = "InventoryReservation";
 
-    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final OutboxEventRepository outboxEventRepository;
     private final ObjectMapper objectMapper;
 
-    public InventoryEventPublisher(KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper) {
-        this.kafkaTemplate = kafkaTemplate;
+    public InventoryEventPublisher(OutboxEventRepository outboxEventRepository, ObjectMapper objectMapper) {
+        this.outboxEventRepository = outboxEventRepository;
         this.objectMapper = objectMapper;
     }
 
     public void publishReserved(InventoryReservedPayload payload) {
-        publish(KafkaTopics.INVENTORY_RESERVED, "InventoryReserved", payload.orderId(), payload);
+        record(KafkaTopics.INVENTORY_RESERVED, "InventoryReserved", payload.orderId(), payload);
     }
 
     public void publishReleased(InventoryReleasedPayload payload) {
-        publish(KafkaTopics.INVENTORY_RELEASED, "InventoryReleased", payload.orderId(), payload);
+        record(KafkaTopics.INVENTORY_RELEASED, "InventoryReleased", payload.orderId(), payload);
     }
 
     public void publishFailed(InventoryFailedPayload payload) {
-        publish(KafkaTopics.INVENTORY_FAILED, "InventoryFailed", payload.orderId(), payload);
+        record(KafkaTopics.INVENTORY_FAILED, "InventoryFailed", payload.orderId(), payload);
     }
 
-    private void publish(String topic, String eventType, UUID key, Object payload) {
+    private void record(String topic, String eventType, UUID aggregateId, Object payload) {
         // A fresh correlationId per publish is a Phase 6 stand-in -- propagating the
         // correlationId that originated the HTTP request through to here is Phase 12's
         // job (docs/observability.md).
@@ -62,14 +55,10 @@ public class InventoryEventPublisher {
         try {
             json = objectMapper.writeValueAsString(envelope);
         } catch (Exception e) {
-            log.error("Failed to serialize {} for key {}; event was not published", eventType, key, e);
+            log.error("Failed to serialize {} for aggregate {}; outbox row was not written", eventType, aggregateId, e);
             return;
         }
 
-        kafkaTemplate.send(topic, key.toString(), json).whenComplete((result, ex) -> {
-            if (ex != null) {
-                log.error("Failed to publish {} to topic {} for key {}", eventType, topic, key, ex);
-            }
-        });
+        outboxEventRepository.save(new OutboxEvent(AGGREGATE_TYPE, aggregateId, eventType, topic, json));
     }
 }
