@@ -1,5 +1,7 @@
 # Smart Delivery Platform
 
+[![CI](https://github.com/yassinefourati/smart-delivery-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/yassinefourati/smart-delivery-platform/actions/workflows/ci.yml)
+
 A microservices-based smart logistics and delivery management platform — a simplified
 combination of Amazon-style logistics and food-delivery systems. Customers browse
 products, place orders, pay, and track delivery; warehouse managers control inventory;
@@ -67,6 +69,7 @@ mvn clean install
 - [Security](docs/security.md)
 - [Observability](docs/observability.md)
 - [Testing](docs/testing.md)
+- [CI/CD](docs/ci-cd.md)
 - [Local development](docs/local-development.md)
 - [Architecture Decision Records](docs/adr)
 
@@ -195,7 +198,18 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       compile and pass in CI, not run to completion here -- only the two integration
       tests needing no containers (this new one and `ResilienceIntegrationTest`) have
       actually been executed and confirmed passing in this environment.
-- [ ] Phase 14 — CI/CD
+- [x] **Phase 14 — CI/CD**: `docker-build` now publishes each service's image to GHCR
+      (`ghcr.io/yassinefourati/smart-delivery-platform/<service>:latest` and
+      `:<commit-sha>`), gated to only fire on a push to `main` -- a PR (including one
+      from a fork) still gets a real build, proving the `Dockerfile` works, but never
+      publishes. Uses the workflow's own `GITHUB_TOKEN`, no extra secret needed, scoped
+      to `packages: write` at the job level only. Added `.github/dependabot.yml` (weekly
+      Maven, Docker base image, and GitHub Actions updates) and a CI status badge to
+      this README. No deploy step: there's no Kubernetes manifest, Helm chart, or cloud
+      environment anywhere in this repository to deploy *to* -- see
+      [docs/ci-cd.md](docs/ci-cd.md) for that scoping decision, made the same way
+      Phase 12's Kafka-lag panel and Phase 1's static analysis were deferred rather than
+      built against nothing real.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be
