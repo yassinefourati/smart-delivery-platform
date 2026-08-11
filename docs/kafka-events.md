@@ -1,16 +1,15 @@
 # Kafka Event Catalog
 
-> Producers and consumers for `order.created`/`order.cancelled` (order-service),
-> `inventory.reserved`/`inventory.released`/`inventory.failed` (inventory-service), and
-> `payment.completed`/`payment.failed` (payment-service) are all wired and real as of
-> Phase 7, including retry + dead-letter handling. As of Phase 8, every one of those
-> producers publishes through the transactional outbox (ADR 004), not a direct
-> `KafkaTemplate.send()` -- see [below](#the-outbox-in-practice). `shipment.created`,
-> `delivery.assigned`, and `delivery.completed` are consumed by order-service already
-> (so its saga-handling code is real and tested), but nothing publishes them yet --
-> delivery-service doesn't exist until Phase 9. See [saga.md](saga.md) for the full
-> picture of what drives an order through its lifecycle today versus what's still
-> missing.
+> As of Phase 9, every topic in the catalog below has a real producer and every
+> consumer order-service has carried since Phase 6 finally has something to react to:
+> `order.created`/`order.cancelled` (order-service), `inventory.reserved`/
+> `inventory.released`/`inventory.failed` (inventory-service), `payment.completed`/
+> `payment.failed` (payment-service), and now `shipment.created`/`delivery.assigned`/
+> `delivery.completed` (delivery-service, consuming `payment.completed` to create the
+> shipment that starts its own side of the flow). All of it includes bounded retry +
+> dead-letter handling, and every producer publishes through the transactional outbox
+> (ADR 004) -- see [below](#the-outbox-in-practice). See [saga.md](saga.md) for the full
+> picture of what drives an order through its lifecycle end to end.
 
 ## Envelope
 
@@ -64,6 +63,14 @@ reintroducing.
 | `delivery.assigned` | delivery-service | order-service, notification-service | orderId, shipmentId, agentId |
 | `delivery.completed` | delivery-service | order-service, notification-service | orderId, shipmentId, deliveredAt |
 
+**`shipment.created`/`delivery.assigned`/`delivery.completed` are real as of Phase 9.**
+delivery-service consumes `payment.completed` (`PaymentCompletedListener`) to create a
+`Shipment` per order, publishes `shipment.created`; an admin assigning a `DeliveryAgent`
+publishes `delivery.assigned`; that agent marking the delivery done publishes
+`delivery.completed`. order-service's handling of all three has been real and tested
+since Phase 6 (`OrderSagaEventHandler`) -- Phase 9 only had to make delivery-service
+actually publish them, no order-service change was needed.
+
 `delivery.assigned`'s payload includes `orderId` (not just `shipmentId`/`agentId`) so that
 order-service -- which only knows about shipments by their effect on an order, not as a
 concept of its own -- doesn't need a synchronous call back to delivery-service just to
@@ -115,12 +122,16 @@ envelope's `payload` as a `JsonNode`, sidestepping that entirely -- see
 
 ## The outbox in practice
 
-**As of Phase 8, every producer above goes through the transactional outbox** (ADR 004)
-instead of calling `KafkaTemplate.send()` directly. Each service has its own
-`outbox_events` table (`OutboxEvent`/`OutboxStatus`/`OutboxEventRepository`) and:
+**Every producer in this catalog goes through the transactional outbox** (ADR 004)
+instead of calling `KafkaTemplate.send()` directly -- order-service, inventory-service,
+and payment-service since Phase 8; delivery-service used it from the day its first
+producer (`DeliveryEventPublisher`) was written, Phase 9, rather than repeating the
+direct-`send()` gap Phase 8 had just finished closing elsewhere. Each service has its
+own `outbox_events` table (`OutboxEvent`/`OutboxStatus`/`OutboxEventRepository`) and:
 
-- `OrderEventPublisher`, `InventoryEventPublisher`, `PaymentEventPublisher` no longer
-  touch `KafkaTemplate` at all. Instead they build the same `EventEnvelope` as before,
+- `OrderEventPublisher`, `InventoryEventPublisher`, `PaymentEventPublisher`,
+  `DeliveryEventPublisher` don't touch `KafkaTemplate` at all. Instead they build the
+  same `EventEnvelope` as before,
   serialize it, and write it as a `PENDING` `OutboxEvent` row -- called from *inside*
   the same `@Transactional` method that made the business change (e.g.
   `OrderService.create`, `InventoryReservationOperations.reserveAttempt`,

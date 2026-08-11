@@ -54,11 +54,11 @@ concurrent-access integration tests in Phase 4 (Inventory Service).
 
 ## Outbox tables
 
-Any service that publishes Kafka events from a transaction that also changes its own
-data owns an `outbox_event` table in its own database (order-service being the primary
-example, given the saga). See [ADR 004](adr/004-outbox-pattern.md) and
-[kafka-events.md](kafka-events.md) for the full design; the table shape is finalized
-when Phase 8 implements it.
+Every service that publishes Kafka events owns an `outbox_events` table in its own
+database (order-service, inventory-service, payment-service since Phase 8;
+delivery-service from the start, Phase 9) — a business-data write and the outbox row
+announcing it commit in the same local transaction. See [ADR 004](adr/004-outbox-pattern.md)
+and [kafka-events.md](kafka-events.md#the-outbox-in-practice) for the full design.
 
 ## Migration ownership
 

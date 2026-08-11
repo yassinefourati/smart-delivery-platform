@@ -108,7 +108,7 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       conflict; full compensation (partial-reservation rollback, payment-decline
       release, paid-order-cancellation refund); the whole saga is retry-safe end to
       end because every step is independently idempotent. Order → Payment → Shipment
-      remains untriggered until delivery-service exists (Phase 9).
+      remained untriggered until delivery-service was built (Phase 9).
 - [x] **Phase 8 — Transactional outbox**: `OrderEventPublisher`, `InventoryEventPublisher`,
       and `PaymentEventPublisher` now write an `OutboxEvent` row inside the same
       transaction as the business change they announce, instead of calling
@@ -118,20 +118,32 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       controllers into the `@Transactional` service methods themselves (`OrderService`,
       `PaymentService`, `InventoryReservationOperations`) so the outbox write is
       genuinely atomic with the change it describes.
-- [ ] Phase 9 — Delivery service
+- [x] **Phase 9 — Delivery service**: built from scratch -- `DeliveryAgent`/`Shipment`/
+      `Delivery` domain, all three writing through the transactional outbox from day
+      one (no direct-`KafkaTemplate.send()` phase to retrofit, unlike Phases 6-7's
+      producers). `PaymentCompletedListener` reacts to `payment.completed` to create a
+      `Shipment` per order (idempotent, unique on `orderId`); an ADMIN assigns a
+      `DeliveryAgent` (idempotent for a repeat request to the same agent, a real
+      conflict for a different one); that agent marks the delivery complete
+      (idempotent, ownership-enforced -- a `DELIVERY_AGENT` can only touch their own
+      assignments, mirroring `/api/v1/orders/user/{userId}`'s ownership pattern).
+      Publishes `shipment.created`/`delivery.assigned`/`delivery.completed`, which
+      order-service has consumed since Phase 6 without needing any change here -- the
+      saga's Payment → Shipment → Delivery leg is real end to end for the first time.
 - [ ] Phase 10 — Notification service
 - [ ] Phase 11 — Resilience4j (circuit breaker, retry, bulkhead, rate limiter)
 - [ ] Phase 12 — Observability (Prometheus, Grafana, OpenTelemetry, correlation IDs)
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-`user-service`, `product-service`, `inventory-service`, `order-service`, and
-`payment-service` now have real business logic end to end. Placing an order actually
-reserves inventory and charges a (mock) payment, asynchronously, with full compensation
-on failure -- see [docs/saga.md](docs/saga.md). `delivery-service` and
-`notification-service` are still minimal Spring Boot applications exposing only
+`user-service`, `product-service`, `inventory-service`, `order-service`,
+`payment-service`, and `delivery-service` now have real business logic end to end.
+Placing an order actually reserves inventory, charges a (mock) payment, creates a
+shipment, and can be carried through assignment and delivery by a real agent -- with
+full compensation on failure up through payment -- see [docs/saga.md](docs/saga.md).
+`notification-service` is still a minimal Spring Boot application exposing only
 `/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built the same
-incremental way once their phase starts.
+incremental way once its phase starts.
 
 ## License
 

@@ -40,8 +40,13 @@ Owns `Payment`/`PaymentTransaction` and the mock payment provider. Knows nothing
 orders beyond an opaque `orderId` reference and an amount to charge.
 
 ### `delivery-service`
-Owns `DeliveryAgent`, `Shipment`, `Delivery`. Reacts to order confirmation events to
-create a shipment; owns agent assignment.
+Owns `DeliveryAgent`, `Shipment`, `Delivery`. Reacts to `payment.completed` to create a
+`Shipment` (one per order); an admin assigns a `DeliveryAgent`, creating a `Delivery`;
+that agent marks it complete. Publishes `shipment.created`, `delivery.assigned`, and
+`delivery.completed` -- order-service has consumed these since Phase 6, so wiring a real
+producer in Phase 9 didn't require any order-service change. `DeliveryAgent.userId`
+links to a user-service `User` with the `DELIVERY_AGENT` role; delivery-service trusts
+that link rather than verifying it synchronously (see [security.md](security.md)).
 
 ### `notification-service`
 Owns nothing that other services need — it's a pure Kafka consumer that renders and
@@ -62,8 +67,9 @@ to directly.
 | order-service | payment-service | REST (charge/refund) | needs an immediate result to advance the saga |
 | order-service | Kafka (`order.*`) | publish | other services react asynchronously |
 | inventory-service | Kafka (`inventory.*`) | publish | order-service (saga) and analytics react |
-| payment-service | Kafka (`payment.*`) | publish | order-service (saga) and notification-service react |
-| delivery-service | Kafka (`shipment.*`, `delivery.*`) | publish | notification-service reacts |
+| payment-service | Kafka (`payment.*`) | publish | order-service (saga), delivery-service, and notification-service react |
+| delivery-service | Kafka (`payment.completed`) | consume | create a shipment once an order is paid |
+| delivery-service | Kafka (`shipment.*`, `delivery.*`) | publish | order-service (saga) and notification-service react |
 | notification-service | Kafka (all topics above) | consume only | never calls another service back |
 
 No row reads "Service X → Service Y direct SQL." That row does not exist by design.

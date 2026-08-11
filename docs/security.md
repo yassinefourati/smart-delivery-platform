@@ -56,6 +56,21 @@ customer requesting someone else's `userId` gets `403 Forbidden`, not their data
 are the one role explicitly allowed to pass an arbitrary `userId`, and that's enforced
 by role check, not by trusting the path variable.
 
+## DELIVERY_AGENT ownership (Phase 9)
+
+`delivery-service`'s `DeliveryAgent.userId` links a delivery-agent record to the
+user-service `User` (with the `DELIVERY_AGENT` role) whose JWT authenticates them --
+delivery-service trusts this link rather than calling user-service to verify it, the
+same trust boundary order-service already extends to the `userId` it reads out of a
+JWT. `DeliveryController`'s ownership checks (`getById`, `complete`,
+`GET /agent/{userId}`) compare that JWT subject against the delivery's assigned agent,
+exactly the "role gets you past the door, ownership decides what you can touch" pattern
+`/api/v1/orders/user/{userId}` already uses: a `DELIVERY_AGENT` completing someone
+else's delivery gets `403 Forbidden`, not someone else's delivery. `ADMIN` bypasses
+ownership entirely, as everywhere else in this platform. Agent management
+(`/api/v1/agents/**`) and shipment dispatch (`/api/v1/shipments/**`) are ADMIN-only --
+back-office concerns an agent has no reason to reach.
+
 ## Service-to-service authentication (SERVICE role)
 
 The order Saga (Phase 7) needs order-service to call inventory-service (reserve/

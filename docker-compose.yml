@@ -262,6 +262,11 @@ services:
     container_name: sdp-delivery-service
     ports:
       - "8086:8086"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/delivery_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
       postgres:
         condition: service_healthy
