@@ -1,0 +1,57 @@
+spring:
+  application:
+    name: api-gateway
+  cloud:
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 3000
+            response-timeout: 5s
+          routes:
+            - id: user-service
+              uri: ${USER_SERVICE_URI:http://localhost:8081}
+              predicates:
+                - Path=/api/v1/users/**,/api/v1/auth/**
+            - id: product-service
+              uri: ${PRODUCT_SERVICE_URI:http://localhost:8082}
+              predicates:
+                - Path=/api/v1/products/**,/api/v1/categories/**
+            - id: inventory-service
+              uri: ${INVENTORY_SERVICE_URI:http://localhost:8083}
+              predicates:
+                - Path=/api/v1/inventory/**
+            - id: order-service
+              uri: ${ORDER_SERVICE_URI:http://localhost:8084}
+              predicates:
+                - Path=/api/v1/orders/**
+            - id: payment-service
+              uri: ${PAYMENT_SERVICE_URI:http://localhost:8085}
+              predicates:
+                - Path=/api/v1/payments/**
+            - id: delivery-service
+              uri: ${DELIVERY_SERVICE_URI:http://localhost:8086}
+              predicates:
+                - Path=/api/v1/shipments/**,/api/v1/delivery-agents/**
+
+server:
+  port: 8080
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,gateway
+  endpoint:
+    health:
+      show-details: when-authorized
+
+info:
+  app:
+    name: api-gateway
+    description: Edge API Gateway routing client traffic to backend microservices
+
+# NOTE: routing is static (Docker Compose DNS / env-var overrides) for this stage of the
+# platform. There is no service registry (Eureka/Consul) yet -- introducing one is only
+# justified once we run multiple instances per service and need client-side load balancing.
+# See docs/architecture.md for the rationale.

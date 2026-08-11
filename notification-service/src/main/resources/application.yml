@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: notification-service
+
+server:
+  port: 8087
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: notification-service
+    description: Event-driven customer notification service

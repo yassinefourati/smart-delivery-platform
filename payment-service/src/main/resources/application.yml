@@ -1,0 +1,23 @@
+spring:
+  application:
+    name: payment-service
+
+server:
+  port: 8085
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: when-authorized
+  info:
+    env:
+      enabled: true
+
+info:
+  app:
+    name: payment-service
+    description: Mock payment processing service
