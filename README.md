@@ -81,7 +81,11 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       publicly browsable reads), pagination/sorting/category/price/text-search
       filtering, Redis-backed product cache with write-through invalidation, unit +
       Testcontainers (Postgres + Redis) integration tests.
-- [ ] Phase 4 — Inventory service (reservation, optimistic locking)
+- [x] **Phase 4 — Inventory service**: warehouse + stock management, reserve/release/
+      deduct lifecycle (idempotent per order+product), optimistic locking with a
+      retry orchestrator that absorbs lock contention without overselling or
+      spuriously failing legitimate concurrent reservations, unit + Testcontainers
+      integration tests including the two-customers-one-unit concurrency scenario.
 - [ ] Phase 5 — Order service (state machine, idempotency)
 - [ ] Phase 6 — Kafka event contracts & producers/consumers
 - [ ] Phase 7 — Saga orchestration (order → inventory → payment → shipment)
@@ -93,8 +97,9 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-`user-service` and `product-service` now have real business logic end to end; the
-remaining services are still minimal Spring Boot applications exposing only
+`user-service`, `product-service`, and `inventory-service` now have real business
+logic end to end; the remaining services are still minimal Spring Boot applications
+exposing only
 `/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built in the same
 incremental way once their phase starts.
 

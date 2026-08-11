@@ -178,6 +178,10 @@ services:
     container_name: sdp-inventory-service
     ports:
       - "8083:8083"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/inventory_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
     depends_on:
       postgres:
         condition: service_healthy
