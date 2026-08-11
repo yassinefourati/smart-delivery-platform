@@ -19,7 +19,7 @@ COPY product-service/src product-service/src
 RUN --mount=type=cache,target=/root/.m2 \
     mvn -B -pl product-service -am -DskipTests package
 
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:25-jre-alpine
 RUN addgroup -S spring && adduser -S spring -G spring
 WORKDIR /app
 COPY --from=build /workspace/product-service/target/*.jar app.jar
