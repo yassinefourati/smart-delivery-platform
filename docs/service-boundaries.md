@@ -57,6 +57,7 @@ to directly.
 | Caller | Callee | Mechanism | Why |
 |---|---|---|---|
 | api-gateway | all services | REST (proxied) | client entry point |
+| order-service | product-service | REST (`GET /products/{id}`) | snapshot name/price/availability into the order at creation time -- needed to even build the order, not part of the saga (see [order-flow.md](order-flow.md)) |
 | order-service | inventory-service | REST (reserve/release/deduct) | needs an immediate yes/no before proceeding |
 | order-service | payment-service | REST (charge) | needs an immediate result to advance the saga |
 | order-service | Kafka (`order.*`) | publish | other services react asynchronously |

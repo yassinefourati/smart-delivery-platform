@@ -1,6 +1,21 @@
 spring:
   application:
     name: order-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/order_db}
+    username: ${DB_USERNAME:sdp}
+    password: ${DB_PASSWORD:sdp_local_dev_only}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
 
 server:
   port: 8084
@@ -21,3 +36,16 @@ info:
   app:
     name: order-service
     description: Order lifecycle and Saga orchestration service
+
+# Must match user-service's jwt.secret -- see docs/security.md. Local-dev-only default;
+# every non-local environment MUST override this via the JWT_SECRET env var.
+jwt:
+  secret: ${JWT_SECRET:local-dev-only-secret-key-do-not-use-in-production-min-32-bytes}
+
+services:
+  product-service:
+    base-url: ${PRODUCT_SERVICE_URI:http://localhost:8082}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
