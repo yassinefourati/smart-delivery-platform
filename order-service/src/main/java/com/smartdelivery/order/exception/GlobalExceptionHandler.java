@@ -1,5 +1,8 @@
 package com.smartdelivery.order.exception;
 
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
+import io.github.resilience4j.ratelimiter.RequestNotPermitted;
 import jakarta.servlet.http.HttpServletRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -60,6 +63,22 @@ public class GlobalExceptionHandler {
     public ResponseEntity<ErrorResponse> handleUpstreamUnavailable(ProductServiceUnavailableException ex, HttpServletRequest request) {
         log.warn("product-service unavailable while processing {} {}", request.getMethod(), request.getRequestURI());
         return build(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE", ex.getMessage(), request);
+    }
+
+    /**
+     * Resilience4j's own "the call was never attempted" exceptions (open circuit, full
+     * bulkhead, no rate-limit permit) -- see docs/resilience.md. Only reached on the
+     * synchronous order-creation path (ProductServiceClient.getProduct); the saga's
+     * calls run inside a {@code @KafkaListener} and never reach this handler at all,
+     * since there's no HTTP response to build there -- they propagate to Spring Kafka's
+     * retry/dead-letter handling instead (docs/saga.md#resumability).
+     */
+    @ExceptionHandler({CallNotPermittedException.class, BulkheadFullException.class, RequestNotPermitted.class})
+    public ResponseEntity<ErrorResponse> handleResilienceRejection(Exception ex, HttpServletRequest request) {
+        log.warn("Downstream call rejected by Resilience4j while processing {} {}: {}",
+                request.getMethod(), request.getRequestURI(), ex.getMessage());
+        return build(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE",
+                "A downstream service is temporarily unavailable; please retry", request);
     }
 
     @ExceptionHandler(AuthenticationException.class)

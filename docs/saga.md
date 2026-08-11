@@ -112,9 +112,9 @@ whether to proceed or compensate (see
 [service-boundaries.md](service-boundaries.md#communication-matrix)). Shipment and
 Delivery are not orchestrated at all — delivery-service reacts to `payment.completed`
 and to admin/agent actions entirely on its own, and order-service is just one more
-consumer of the facts it announces, the same relationship notification-service will
-have. There's nothing for order-service to orchestrate there because nothing needs an
-immediate yes/no back from it.
+consumer of the facts it announces, the same relationship notification-service (Phase
+10) has to every topic in the catalog. There's nothing for order-service to orchestrate
+there because nothing needs an immediate yes/no back from it.
 
 ## Resumability
 

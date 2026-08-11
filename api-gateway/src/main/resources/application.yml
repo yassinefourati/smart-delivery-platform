@@ -32,7 +32,7 @@ spring:
             - id: delivery-service
               uri: ${DELIVERY_SERVICE_URI:http://localhost:8086}
               predicates:
-                - Path=/api/v1/shipments/**,/api/v1/delivery-agents/**
+                - Path=/api/v1/agents/**,/api/v1/shipments/**,/api/v1/deliveries/**
 
 server:
   port: 8080
@@ -41,10 +41,22 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,gateway
+        include: health,info,metrics,gateway,prometheus
   endpoint:
     health:
       show-details: when-authorized
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http:
+          server:
+            requests: true
+  tracing:
+    sampling:
+      probability: 1.0
+  otlp:
+    tracing:
+      endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
 
 info:
   app:
@@ -55,3 +67,22 @@ info:
 # platform. There is no service registry (Eureka/Consul) yet -- introducing one is only
 # justified once we run multiple instances per service and need client-side load balancing.
 # See docs/architecture.md for the rationale.
+
+# NOTE: no `logging.pattern.level` MDC placeholder here, unlike every backend service --
+# WebFlux doesn't run a request on one dedicated thread the way a blocking Servlet
+# service does, so a plain MDC.put() in CorrelationIdGlobalFilter wouldn't reliably
+# still be visible by the time a later log statement runs on a different Reactor
+# thread. CorrelationIdGlobalFilter logs the id directly instead -- see its Javadoc.
+---
+# Activated via SPRING_PROFILES_ACTIVE=docker (docker-compose.yml). Structured JSON
+# for log output -- queryable by a log aggregator, not just regex-scraped -- see
+# docs/observability.md. Left off by default so `mvn spring-boot:run` and IDE runs stay
+# human-readable.
+spring:
+  config:
+    activate:
+      on-profile: docker
+logging:
+  structured:
+    format:
+      console: ecs

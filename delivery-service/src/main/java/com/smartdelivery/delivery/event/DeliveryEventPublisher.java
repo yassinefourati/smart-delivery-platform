@@ -3,6 +3,7 @@ package com.smartdelivery.delivery.event;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
@@ -50,11 +51,8 @@ public class DeliveryEventPublisher {
     }
 
     private void record(String aggregateType, String topic, String eventType, UUID aggregateId, Object payload) {
-        // A fresh correlationId per publish is a Phase 6 stand-in -- propagating the
-        // correlationId that originated the request through to here is Phase 12's job
-        // (docs/observability.md).
         var envelope = new EventEnvelope(
-                UUID.randomUUID(), eventType, 1, Instant.now(), UUID.randomUUID(), SOURCE,
+                UUID.randomUUID(), eventType, 1, Instant.now(), currentCorrelationId(), SOURCE,
                 objectMapper.valueToTree(payload));
 
         String json;
@@ -66,5 +64,24 @@ public class DeliveryEventPublisher {
         }
 
         outboxEventRepository.save(new OutboxEvent(aggregateType, aggregateId, eventType, topic, json));
+    }
+
+    /**
+     * The id of the request (or, for a Kafka-triggered write, the event) that caused
+     * this publish -- see CorrelationIdFilter and PaymentCompletedListener's own MDC
+     * handling. Falls back to a fresh id only if nothing populated the MDC, which would
+     * itself be a bug elsewhere (every entry point into this service sets it); this is
+     * a safety net, not the expected path.
+     */
+    private UUID currentCorrelationId() {
+        String correlationId = MDC.get("correlationId");
+        if (correlationId != null) {
+            try {
+                return UUID.fromString(correlationId);
+            } catch (IllegalArgumentException ignored) {
+                // fall through to a fresh id below
+            }
+        }
+        return UUID.randomUUID();
     }
 }

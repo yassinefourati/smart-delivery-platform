@@ -61,6 +61,7 @@ mvn clean install
 - [Service boundaries & communication rules](docs/service-boundaries.md)
 - [Order flow](docs/order-flow.md)
 - [Saga pattern](docs/saga.md)
+- [Resilience](docs/resilience.md)
 - [Kafka event catalog](docs/kafka-events.md)
 - [Database design](docs/database-design.md)
 - [Security](docs/security.md)
@@ -130,20 +131,67 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       Publishes `shipment.created`/`delivery.assigned`/`delivery.completed`, which
       order-service has consumed since Phase 6 without needing any change here -- the
       saga's Payment → Shipment → Delivery leg is real end to end for the first time.
-- [ ] Phase 10 — Notification service
-- [ ] Phase 11 — Resilience4j (circuit breaker, retry, bulkhead, rate limiter)
-- [ ] Phase 12 — Observability (Prometheus, Grafana, OpenTelemetry, correlation IDs)
+- [x] **Phase 10 — Notification service**: the platform's other consumer of every topic
+      in the catalog (10, alongside order-service's subset) -- and the only service that
+      publishes none of its own. No database, no REST API, no Spring Security: nothing
+      calls it and it owns no data (see docs/service-boundaries.md). `NotificationEventListener`
+      renders each event into a human-readable line, delegated to `NotificationSender`
+      (the mock boundary, logs at `INFO`; a real deployment would call an email/SMS/push
+      provider here, same pattern as `MockPaymentProvider`). Found and fixed a real,
+      previously-latent bug while building this: a monetary `BigDecimal` round-tripped
+      through an envelope's untyped `JsonNode` payload doesn't reliably keep its original
+      scale, so rendering one for a human now always uses explicit `%.2f` formatting
+      instead of the value's own (unreliable) `toString()` -- see docs/kafka-events.md.
+- [x] **Phase 11 — Resilience4j**: circuit breaker, retry, bulkhead, and rate limiter on
+      order-service's three synchronous REST clients (`ProductServiceClient`,
+      `InventoryServiceClient`, `PaymentServiceClient`) -- the only service in the
+      platform that makes a synchronous call to another service. One
+      breaker/bulkhead/limiter instance per downstream, shared across all of that
+      downstream's operations. `InsufficientStockException` (a 409, a real business
+      outcome) is explicitly exempted from the `inventory-service` breaker and retry so
+      a routine "no stock" answer never trips resilience machinery meant for actual
+      outages -- see docs/resilience.md. No fallback methods: the saga's calls
+      propagate any Resilience4j rejection into Spring Kafka's existing retry/DLT
+      handling exactly like any other infrastructure failure (saga resumability,
+      untouched); the synchronous product-service call maps the same rejections to a
+      `503` via `GlobalExceptionHandler`. `ResilienceIntegrationTest` is the one
+      integration test in this codebase that actually runs in this sandbox (no
+      Postgres/Kafka needed) and verifies both directions: repeated business failures
+      never open the circuit, repeated infrastructure failures do. Also found and
+      worked around a real dependency-resolution bug: `resilience4j-spring-boot3`'s
+      nominal latest release pulls in a version-inconsistent `resilience4j-spring6`
+      that fails to boot; pinned to a fully self-consistent `2.2.0` instead, confirmed
+      by that same test actually passing.
+- [x] **Phase 12 — Observability**: gateway-assigned `correlationId`, propagated via
+      `X-Correlation-Id` through every REST call and Kafka event, into the SLF4J MDC and
+      onto the current tracing span in every backend service (`CorrelationIdFilter`);
+      structured JSON logs in the `docker` profile. `micrometer-registry-prometheus` on
+      all 8 services, scraped by a new `prometheus` Compose service. Distributed tracing
+      via `micrometer-tracing-bridge-otel` exporting OTLP to a new `tempo` Compose
+      service, every request sampled. A new `grafana` Compose service, provisioned (not
+      clicked together by hand) with Prometheus/Tempo datasources and a starter
+      dashboard: request rate/error rate/p95 latency per service, JVM heap/GC, HikariCP
+      pool saturation, and order processing outcomes/failure rate (a new
+      `order.saga.outcomes` counter). Kafka consumer lag panel scoped out -- would need
+      its own exporter container, nothing else here depends on it. WebFlux's
+      thread-hopping means api-gateway's own filter can't rely on MDC or
+      `Tracer.currentSpan()` the way every blocking backend service does -- logs the
+      correlation id explicitly instead. See [docs/observability.md](docs/observability.md),
+      including its disclosed verification caveat: Docker is unavailable in this sandbox,
+      so the compose stack's dashboards were never actually rendered against live data.
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-`user-service`, `product-service`, `inventory-service`, `order-service`,
-`payment-service`, and `delivery-service` now have real business logic end to end.
-Placing an order actually reserves inventory, charges a (mock) payment, creates a
-shipment, and can be carried through assignment and delivery by a real agent -- with
-full compensation on failure up through payment -- see [docs/saga.md](docs/saga.md).
-`notification-service` is still a minimal Spring Boot application exposing only
-`/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built the same
-incremental way once its phase starts.
+All eight backend services now have real business logic end to end. Placing an order
+actually reserves inventory, charges a (mock) payment, creates a shipment, can be
+carried through assignment and delivery by a real agent, and generates a logged
+notification at every step along the way -- with full compensation on failure up
+through payment -- see [docs/saga.md](docs/saga.md). `api-gateway` has routed to every
+service's real API since each was built (it owns no business logic of its own by
+design -- see [docs/architecture.md](docs/architecture.md)); its delivery-service route
+predicates were corrected this phase to match the real `/api/v1/agents`,
+`/api/v1/shipments`, and `/api/v1/deliveries` paths built in Phase 9, which the
+placeholder route from before that phase existed didn't match.
 
 ## License
 

@@ -3,6 +3,7 @@ package com.smartdelivery.order.service;
 import com.smartdelivery.order.domain.Order;
 import com.smartdelivery.order.domain.OrderStatus;
 import com.smartdelivery.order.repository.OrderRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -22,7 +23,7 @@ class OrderSagaEventHandlerTest {
     private OrderRepository orderRepository;
 
     private OrderSagaEventHandler handler() {
-        return new OrderSagaEventHandler(orderRepository);
+        return new OrderSagaEventHandler(orderRepository, new SimpleMeterRegistry());
     }
 
     private Order orderWithStatus(OrderStatus status) {

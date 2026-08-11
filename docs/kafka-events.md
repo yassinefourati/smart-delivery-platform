@@ -4,12 +4,14 @@
 > consumer order-service has carried since Phase 6 finally has something to react to:
 > `order.created`/`order.cancelled` (order-service), `inventory.reserved`/
 > `inventory.released`/`inventory.failed` (inventory-service), `payment.completed`/
-> `payment.failed` (payment-service), and now `shipment.created`/`delivery.assigned`/
+> `payment.failed` (payment-service), and `shipment.created`/`delivery.assigned`/
 > `delivery.completed` (delivery-service, consuming `payment.completed` to create the
 > shipment that starts its own side of the flow). All of it includes bounded retry +
 > dead-letter handling, and every producer publishes through the transactional outbox
-> (ADR 004) -- see [below](#the-outbox-in-practice). See [saga.md](saga.md) for the full
-> picture of what drives an order through its lifecycle end to end.
+> (ADR 004) -- see [below](#the-outbox-in-practice). As of Phase 10, notification-service
+> consumes all 10 topics too -- the platform's other consumer, alongside order-service,
+> but the only one with no events of its own to publish. See [saga.md](saga.md) for the
+> full picture of what drives an order through its lifecycle end to end.
 
 ## Envelope
 
@@ -97,6 +99,21 @@ handle:
   consumer's handler must be idempotent — either by checking `eventId` against a
   processed-events record, or, more simply, because the state transition it performs is
   naturally idempotent (see [saga.md](saga.md#idempotency-and-duplicate-events)).
+  notification-service (Phase 10) is the one deliberate exception: it has no state to
+  make idempotent in the first place (it only logs), and a duplicated log line has none
+  of the correctness consequences a duplicated charge or shipment would have -- see
+  `NotificationSender`'s Javadoc.
+- **BigDecimal fields inside `payload`**: a monetary value round-tripped through the
+  envelope's untyped `payload` (`JsonNode`) -- POJO to tree to JSON text to tree to POJO,
+  the path every producer/consumer here uses -- is not guaranteed to keep its original
+  scale (Jackson may normalize `50.00` to a differently-scaled equivalent that's still
+  numerically 50, just no longer prints as `"50.00"`). The value itself is never wrong,
+  only its default `toString()`. Found in Phase 10 when notification-service became the
+  first consumer to actually render a payload's monetary field instead of just reading
+  an id off it (`OrderCreatedPayload.totalAmount`, `PaymentCompletedPayload.amount`).
+  Any consumer rendering one of these for a human should format it explicitly (`%.2f`,
+  not a bare `%s` on the `BigDecimal`) rather than assume the string form survived
+  intact -- see `NotificationEventListener`'s Javadoc.
 - **Ordering**: ordering is only guaranteed within a partition. Events are partitioned
   by `orderId` (or the relevant aggregate ID) so that all events for one order are
   strictly ordered relative to each other, while different orders can be processed in

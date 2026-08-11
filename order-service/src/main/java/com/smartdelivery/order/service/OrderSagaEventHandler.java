@@ -3,6 +3,7 @@ package com.smartdelivery.order.service;
 import com.smartdelivery.order.domain.Order;
 import com.smartdelivery.order.domain.OrderStatus;
 import com.smartdelivery.order.repository.OrderRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -31,9 +32,11 @@ public class OrderSagaEventHandler {
     private static final Logger log = LoggerFactory.getLogger(OrderSagaEventHandler.class);
 
     private final OrderRepository orderRepository;
+    private final MeterRegistry meterRegistry;
 
-    public OrderSagaEventHandler(OrderRepository orderRepository) {
+    public OrderSagaEventHandler(OrderRepository orderRepository, MeterRegistry meterRegistry) {
         this.orderRepository = orderRepository;
+        this.meterRegistry = meterRegistry;
     }
 
     @Transactional
@@ -86,5 +89,25 @@ public class OrderSagaEventHandler {
         }
 
         order.transitionTo(target);
+        recordOutcome(target);
+    }
+
+    /**
+     * Feeds the {@code order.saga.outcomes} counter that backs the "order processing
+     * failure rate" Grafana panel (docs/observability.md) -- one increment per order
+     * that reaches a terminal status, tagged by which one. {@link OrderService#cancel}
+     * increments the same counter for user-initiated cancellations; this method covers
+     * every saga-driven terminal outcome.
+     */
+    private void recordOutcome(OrderStatus target) {
+        String outcome = switch (target) {
+            case DELIVERED -> "delivered";
+            case FAILED -> "failed";
+            case CANCELLED -> "cancelled";
+            default -> null;
+        };
+        if (outcome != null) {
+            meterRegistry.counter("order.saga.outcomes", "outcome", outcome).increment();
+        }
     }
 }

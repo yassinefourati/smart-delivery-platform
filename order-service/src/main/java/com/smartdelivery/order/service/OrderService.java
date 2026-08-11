@@ -13,6 +13,7 @@ import com.smartdelivery.order.exception.OrderNotFoundException;
 import com.smartdelivery.order.exception.ProductNotAvailableException;
 import com.smartdelivery.order.exception.ProductNotFoundException;
 import com.smartdelivery.order.repository.OrderRepository;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -28,11 +29,14 @@ public class OrderService {
     private final OrderRepository orderRepository;
     private final ProductServiceClient productServiceClient;
     private final OrderEventPublisher eventPublisher;
+    private final MeterRegistry meterRegistry;
 
-    public OrderService(OrderRepository orderRepository, ProductServiceClient productServiceClient, OrderEventPublisher eventPublisher) {
+    public OrderService(OrderRepository orderRepository, ProductServiceClient productServiceClient,
+                         OrderEventPublisher eventPublisher, MeterRegistry meterRegistry) {
         this.orderRepository = orderRepository;
         this.productServiceClient = productServiceClient;
         this.eventPublisher = eventPublisher;
+        this.meterRegistry = meterRegistry;
     }
 
     /**
@@ -124,6 +128,7 @@ public class OrderService {
         order.cancel();
         order.getItems().size(); // force-initialize the lazy collection before the transaction (and session) closes
         eventPublisher.publishOrderCancelled(order);
+        meterRegistry.counter("order.saga.outcomes", "outcome", "cancelled").increment();
         return new OrderCancellationResult(order, previousStatus);
     }
 
