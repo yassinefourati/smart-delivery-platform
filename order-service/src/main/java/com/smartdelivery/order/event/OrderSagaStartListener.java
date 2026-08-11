@@ -3,6 +3,7 @@ package com.smartdelivery.order.event;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdelivery.order.service.OrderSagaOrchestrator;
+import org.slf4j.MDC;
 import org.springframework.kafka.annotation.KafkaListener;
 import org.springframework.stereotype.Component;
 
@@ -14,6 +15,12 @@ import org.springframework.stereotype.Component;
  * asynchronous saga design in docs/order-flow.md), and it means saga-start failures
  * get the same bounded retry + dead-letter handling as every other consumer here
  * (KafkaConsumerConfig) for free, instead of needing bespoke retry logic.
+ *
+ * Sets the consumed event's {@code correlationId} into MDC for the duration of
+ * processing (see CorrelationIdFilter, docs/observability.md) -- so the REST calls
+ * OrderSagaOrchestrator makes, and any outbox row a saga step writes, carry the same id
+ * as the HTTP request that originally created the order, rather than a fresh unrelated
+ * one just because this step happens to run off a Kafka consumer thread.
  */
 @Component
 public class OrderSagaStartListener {
@@ -30,6 +37,11 @@ public class OrderSagaStartListener {
     public void onOrderCreated(String message) throws JsonProcessingException {
         EventEnvelope envelope = objectMapper.readValue(message, EventEnvelope.class);
         OrderCreatedPayload payload = objectMapper.treeToValue(envelope.payload(), OrderCreatedPayload.class);
-        orchestrator.startSaga(payload.orderId());
+        MDC.put("correlationId", envelope.correlationId().toString());
+        try {
+            orchestrator.startSaga(payload.orderId());
+        } finally {
+            MDC.remove("correlationId");
+        }
     }
 }

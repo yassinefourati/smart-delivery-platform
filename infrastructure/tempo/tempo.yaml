@@ -1,0 +1,21 @@
+# Grafana Tempo, single-binary/monolithic mode -- the OTLP trace backend for the
+# observability stack (docs/observability.md). Every service exports spans here via
+# management.otlp.tracing.endpoint; Grafana queries them back out via the Tempo
+# datasource (see infrastructure/grafana/provisioning).
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+        grpc:
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal

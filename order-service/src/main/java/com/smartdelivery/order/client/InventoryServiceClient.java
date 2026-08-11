@@ -6,6 +6,7 @@ import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import io.github.resilience4j.retry.annotation.Retry;
+import org.slf4j.MDC;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
@@ -61,6 +62,7 @@ public class InventoryServiceClient {
             restClient.post()
                     .uri("/api/v1/inventory/reserve")
                     .header(HttpHeaders.AUTHORIZATION, bearerToken())
+                    .headers(this::propagateCorrelationId)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(Map.of("orderId", orderId, "productId", productId, "quantity", quantity))
                     .retrieve()
@@ -79,6 +81,7 @@ public class InventoryServiceClient {
         restClient.post()
                 .uri("/api/v1/inventory/release")
                 .header(HttpHeaders.AUTHORIZATION, bearerToken())
+                .headers(this::propagateCorrelationId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("orderId", orderId, "productId", productId))
                 .retrieve()
@@ -93,6 +96,7 @@ public class InventoryServiceClient {
         restClient.post()
                 .uri("/api/v1/inventory/deduct")
                 .header(HttpHeaders.AUTHORIZATION, bearerToken())
+                .headers(this::propagateCorrelationId)
                 .contentType(MediaType.APPLICATION_JSON)
                 .body(Map.of("orderId", orderId, "productId", productId))
                 .retrieve()
@@ -101,5 +105,19 @@ public class InventoryServiceClient {
 
     private String bearerToken() {
         return "Bearer " + tokenProvider.mintServiceToken();
+    }
+
+    /**
+     * Forwards this saga step's correlation id (originally set by CorrelationIdFilter
+     * on the request that created the order, carried forward through Kafka by the saga
+     * listeners' own MDC handling -- see docs/observability.md) to inventory-service,
+     * so its CorrelationIdFilter picks up the same id instead of minting an unrelated
+     * one.
+     */
+    private void propagateCorrelationId(HttpHeaders headers) {
+        String correlationId = MDC.get("correlationId");
+        if (correlationId != null) {
+            headers.add("X-Correlation-Id", correlationId);
+        }
     }
 }

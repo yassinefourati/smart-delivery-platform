@@ -27,6 +27,9 @@ Starts, on one Docker network (`smart-delivery-net`):
 | `sdp-payment-service` | | 8085 |
 | `sdp-delivery-service` | | 8086 |
 | `sdp-notification-service` | | 8087 |
+| `sdp-prometheus` | Metrics, scraping every service's `/actuator/prometheus` | 9090 |
+| `sdp-tempo` | Distributed tracing backend (OTLP ingest + query) | 3200, 4318 |
+| `sdp-grafana` | Dashboards, provisioned Prometheus + Tempo datasources | 3000 |
 
 Every service depends on Postgres/Kafka reporting healthy before it starts, and the
 gateway depends on every backend service reporting healthy before it starts. Check

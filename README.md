@@ -162,7 +162,23 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       nominal latest release pulls in a version-inconsistent `resilience4j-spring6`
       that fails to boot; pinned to a fully self-consistent `2.2.0` instead, confirmed
       by that same test actually passing.
-- [ ] Phase 12 — Observability (Prometheus, Grafana, OpenTelemetry, correlation IDs)
+- [x] **Phase 12 — Observability**: gateway-assigned `correlationId`, propagated via
+      `X-Correlation-Id` through every REST call and Kafka event, into the SLF4J MDC and
+      onto the current tracing span in every backend service (`CorrelationIdFilter`);
+      structured JSON logs in the `docker` profile. `micrometer-registry-prometheus` on
+      all 8 services, scraped by a new `prometheus` Compose service. Distributed tracing
+      via `micrometer-tracing-bridge-otel` exporting OTLP to a new `tempo` Compose
+      service, every request sampled. A new `grafana` Compose service, provisioned (not
+      clicked together by hand) with Prometheus/Tempo datasources and a starter
+      dashboard: request rate/error rate/p95 latency per service, JVM heap/GC, HikariCP
+      pool saturation, and order processing outcomes/failure rate (a new
+      `order.saga.outcomes` counter). Kafka consumer lag panel scoped out -- would need
+      its own exporter container, nothing else here depends on it. WebFlux's
+      thread-hopping means api-gateway's own filter can't rely on MDC or
+      `Tracer.currentSpan()` the way every blocking backend service does -- logs the
+      correlation id explicitly instead. See [docs/observability.md](docs/observability.md),
+      including its disclosed verification caveat: Docker is unavailable in this sandbox,
+      so the compose stack's dashboards were never actually rendered against live data.
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 

@@ -13,6 +13,7 @@ import com.smartdelivery.order.exception.OrderNotFoundException;
 import com.smartdelivery.order.exception.ProductNotAvailableException;
 import com.smartdelivery.order.exception.ProductNotFoundException;
 import com.smartdelivery.order.repository.OrderRepository;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
@@ -45,7 +46,7 @@ class OrderServiceTest {
     private OrderEventPublisher eventPublisher;
 
     private OrderService service() {
-        return new OrderService(orderRepository, productServiceClient, eventPublisher);
+        return new OrderService(orderRepository, productServiceClient, eventPublisher, new SimpleMeterRegistry());
     }
 
     private CreateOrderRequest requestFor(UUID productId, int quantity) {

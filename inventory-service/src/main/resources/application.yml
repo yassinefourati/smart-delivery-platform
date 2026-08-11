@@ -32,10 +32,22 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics
+        include: health,info,metrics,prometheus
   endpoint:
     health:
       show-details: when-authorized
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http:
+          server:
+            requests: true
+  tracing:
+    sampling:
+      probability: 1.0
+  otlp:
+    tracing:
+      endpoint: ${OTLP_TRACING_ENDPOINT:http://localhost:4318/v1/traces}
   info:
     env:
       enabled: true
@@ -57,3 +69,22 @@ outbox:
 springdoc:
   swagger-ui:
     path: /swagger-ui.html
+
+# correlationId (see CorrelationIdFilter) on every log line -- docs/observability.md.
+logging:
+  pattern:
+    level: "%5p [%X{correlationId:-}]"
+
+---
+# Activated via SPRING_PROFILES_ACTIVE=docker (docker-compose.yml). Structured JSON
+# instead of the plain-text pattern above: queryable by a log aggregator, not just
+# regex-scraped -- see docs/observability.md. Left off by default so `mvn spring-boot:run`
+# and IDE runs stay human-readable.
+spring:
+  config:
+    activate:
+      on-profile: docker
+logging:
+  structured:
+    format:
+      console: ecs

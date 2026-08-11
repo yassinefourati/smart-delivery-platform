@@ -92,6 +92,8 @@ services:
     ports:
       - "8080:8080"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       USER_SERVICE_URI: http://user-service:8081
       PRODUCT_SERVICE_URI: http://product-service:8082
       INVENTORY_SERVICE_URI: http://inventory-service:8083
@@ -127,6 +129,8 @@ services:
     ports:
       - "8081:8081"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       DB_URL: jdbc:postgresql://postgres:5432/user_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -151,6 +155,8 @@ services:
     ports:
       - "8082:8082"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       DB_URL: jdbc:postgresql://postgres:5432/product_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -179,6 +185,8 @@ services:
     ports:
       - "8083:8083"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       DB_URL: jdbc:postgresql://postgres:5432/inventory_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -204,6 +212,8 @@ services:
     ports:
       - "8084:8084"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       DB_URL: jdbc:postgresql://postgres:5432/order_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -238,6 +248,8 @@ services:
     ports:
       - "8085:8085"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       DB_URL: jdbc:postgresql://postgres:5432/payment_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -263,6 +275,8 @@ services:
     ports:
       - "8086:8086"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       DB_URL: jdbc:postgresql://postgres:5432/delivery_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -288,6 +302,8 @@ services:
     ports:
       - "8087:8087"
     environment:
+      SPRING_PROFILES_ACTIVE: docker
+      OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
       kafka:
@@ -299,6 +315,52 @@ services:
       retries: 10
       start_period: 30s
 
+  prometheus:
+    image: prom/prometheus:v3.7.3
+    container_name: sdp-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - smart-delivery-net
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.9.1
+    container_name: sdp-tempo
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"
+      - "4318:4318"
+    volumes:
+      - ./infrastructure/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo-data:/var/tempo
+    networks:
+      - smart-delivery-net
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.3.1
+    container_name: sdp-grafana
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_PASSWORD: sdp_local_dev_only
+    volumes:
+      - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - tempo
+    networks:
+      - smart-delivery-net
+    restart: unless-stopped
+
 networks:
   smart-delivery-net:
     driver: bridge
@@ -306,3 +368,6 @@ networks:
 volumes:
   postgres-data:
   redis-data:
+  prometheus-data:
+  tempo-data:
+  grafana-data:

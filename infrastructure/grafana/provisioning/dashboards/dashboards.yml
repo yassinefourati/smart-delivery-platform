@@ -1,0 +1,14 @@
+# Points Grafana at infrastructure/grafana/dashboards for auto-loaded, version-controlled
+# dashboards -- docs/observability.md. Dashboards placed in that folder appear on startup
+# without any manual import step.
+apiVersion: 1
+
+providers:
+  - name: smart-delivery-platform
+    orgId: 1
+    folder: ""
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards

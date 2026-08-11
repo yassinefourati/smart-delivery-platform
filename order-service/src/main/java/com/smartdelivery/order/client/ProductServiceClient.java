@@ -5,6 +5,8 @@ import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
 import io.github.resilience4j.retry.annotation.Retry;
+import org.slf4j.MDC;
+import org.springframework.http.HttpHeaders;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClient;
@@ -46,6 +48,7 @@ public class ProductServiceClient {
         try {
             ProductSnapshot snapshot = restClient.get()
                     .uri("/api/v1/products/{id}", productId)
+                    .headers(this::propagateCorrelationId)
                     .retrieve()
                     .body(ProductSnapshot.class);
             return Optional.ofNullable(snapshot);
@@ -53,6 +56,19 @@ public class ProductServiceClient {
             return Optional.empty();
         } catch (RestClientException e) {
             throw new ProductServiceUnavailableException(e);
+        }
+    }
+
+    /**
+     * Forwards this request's correlation id (set by CorrelationIdFilter, see
+     * docs/observability.md) to product-service, so its own CorrelationIdFilter picks
+     * up the same id instead of minting an unrelated one -- one id for the whole
+     * request across every service it touches.
+     */
+    private void propagateCorrelationId(HttpHeaders headers) {
+        String correlationId = MDC.get("correlationId");
+        if (correlationId != null) {
+            headers.add("X-Correlation-Id", correlationId);
         }
     }
 }
