@@ -3,7 +3,9 @@
 > Producers and consumers for `order.created`/`order.cancelled` (order-service),
 > `inventory.reserved`/`inventory.released`/`inventory.failed` (inventory-service), and
 > `payment.completed`/`payment.failed` (payment-service) are all wired and real as of
-> Phase 7, including retry + dead-letter handling. `shipment.created`,
+> Phase 7, including retry + dead-letter handling. As of Phase 8, every one of those
+> producers publishes through the transactional outbox (ADR 004), not a direct
+> `KafkaTemplate.send()` -- see [below](#the-outbox-in-practice). `shipment.created`,
 > `delivery.assigned`, and `delivery.completed` are consumed by order-service already
 > (so its saga-handling code is real and tested), but nothing publishes them yet --
 > delivery-service doesn't exist until Phase 9. See [saga.md](saga.md) for the full
@@ -111,16 +113,41 @@ Every producer/consumer here uses plain `String` (de)serializers and parses the
 envelope's `payload` as a `JsonNode`, sidestepping that entirely -- see
 `OrderEventPublisher` / `OrderSagaEventListener` / `InventoryEventPublisher`.
 
-## Relationship to the outbox pattern
+## The outbox in practice
 
-**Current state (as of Phase 7): not yet using the outbox.** `OrderEventPublisher`,
-`InventoryEventPublisher`, and `PaymentEventPublisher` all call `KafkaTemplate.send()`
-directly, after the owning transaction has already committed. This is a known, flagged gap, not an oversight --
-see [ADR 004](adr/004-outbox-pattern.md) for exactly why a bare `send()` isn't safe (a
-crash between commit and publish loses the event silently) and
-[saga.md](saga.md#relationship-to-the-outbox-pattern) for how the outbox and the saga
-fit together once it's added. Phase 8 replaces these direct sends with an outbox write
-in the same transaction as the business change, for the producers where losing an
-event actually matters to correctness. Until then: the underlying database change is
-never at risk (it's already committed by the time publishing is attempted), only the
-event announcing it is.
+**As of Phase 8, every producer above goes through the transactional outbox** (ADR 004)
+instead of calling `KafkaTemplate.send()` directly. Each service has its own
+`outbox_events` table (`OutboxEvent`/`OutboxStatus`/`OutboxEventRepository`) and:
+
+- `OrderEventPublisher`, `InventoryEventPublisher`, `PaymentEventPublisher` no longer
+  touch `KafkaTemplate` at all. Instead they build the same `EventEnvelope` as before,
+  serialize it, and write it as a `PENDING` `OutboxEvent` row -- called from *inside*
+  the same `@Transactional` method that made the business change (e.g.
+  `OrderService.create`, `InventoryReservationOperations.reserveAttempt`,
+  `PaymentService.charge`), so the row and the change either both commit or neither
+  does.
+- A separate `OutboxPublisher` (`@Scheduled`, default every 2s --
+  `outbox.poll-interval-ms`) polls `PENDING` rows oldest-first, sends each to Kafka, and
+  marks it `PUBLISHED` on success. A failed send is left `PENDING` (with `attempts`/
+  `lastError` updated) for the next poll to retry -- indefinitely, since "publish an
+  already-published row again" is the only failure mode this needs to tolerate, and
+  every consumer here already handles duplicates (see above).
+- This closes the gap the pre-Phase-8 design had: a crash between the DB commit and the
+  Kafka publish used to lose the event silently. Now the event is durably recorded in
+  the same transaction as the fact it describes, and only *when* it reaches Kafka is
+  variable (bounded by the poll interval), not *whether* it eventually does.
+
+One deliberate behavior change worth calling out: publishing now happens only on the
+actual state-change path, not on every idempotent replay. Pre-Phase-8,
+`InventoryReservationService.reserve()` re-published `InventoryReserved` on every call
+for an order+product that was already reserved, since publish always ran after retrying
+succeeded, whichever branch that was. Post-Phase-8, `InventoryReservationOperations`
+writes the outbox row only in the same transaction as an actual new reservation --
+the early-return "already reserved" branch doesn't re-announce an outcome that was
+already announced. This is more correct, not just different: consumers were always
+required to tolerate duplicates, but not emitting a duplicate in the first place when
+nothing changed is strictly better.
+
+See [saga.md](saga.md#relationship-to-the-outbox-pattern) for how this changed the
+saga's publish path specifically, and [ADR 004](adr/004-outbox-pattern.md) for the full
+design rationale.

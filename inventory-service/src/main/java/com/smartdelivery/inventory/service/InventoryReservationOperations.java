@@ -3,6 +3,9 @@ package com.smartdelivery.inventory.service;
 import com.smartdelivery.inventory.domain.Inventory;
 import com.smartdelivery.inventory.domain.InventoryReservation;
 import com.smartdelivery.inventory.domain.ReservationStatus;
+import com.smartdelivery.inventory.event.InventoryEventPublisher;
+import com.smartdelivery.inventory.event.InventoryReleasedPayload;
+import com.smartdelivery.inventory.event.InventoryReservedPayload;
 import com.smartdelivery.inventory.exception.InsufficientStockException;
 import com.smartdelivery.inventory.exception.InvalidReservationStateException;
 import com.smartdelivery.inventory.exception.ReservationNotFoundException;
@@ -34,13 +37,24 @@ public class InventoryReservationOperations {
 
     private final InventoryRepository inventoryRepository;
     private final InventoryReservationRepository reservationRepository;
+    private final InventoryEventPublisher eventPublisher;
 
     public InventoryReservationOperations(
-            InventoryRepository inventoryRepository, InventoryReservationRepository reservationRepository) {
+            InventoryRepository inventoryRepository, InventoryReservationRepository reservationRepository,
+            InventoryEventPublisher eventPublisher) {
         this.inventoryRepository = inventoryRepository;
         this.reservationRepository = reservationRepository;
+        this.eventPublisher = eventPublisher;
     }
 
+    /**
+     * The outbox write for {@code InventoryReserved} happens here, inside the same
+     * transaction as the reservation itself (ADR 004) -- not in
+     * {@link InventoryReservationService}, which calls this method from outside any
+     * transaction of its own (see that class's Javadoc). Only the actual-creation path
+     * publishes; the idempotent-existing-reservation short-circuit above does not
+     * re-announce an outcome that was already announced the first time.
+     */
     @Transactional
     public InventoryReservation reserveAttempt(UUID orderId, UUID productId, int quantity) {
         var existing = reservationRepository.findByOrderIdAndProductId(orderId, productId);
@@ -64,16 +78,20 @@ public class InventoryReservationOperations {
         inventoryRepository.saveAndFlush(inventory);
 
         InventoryReservation reservation = new InventoryReservation(inventory, orderId, productId, quantity);
+        InventoryReservation saved;
         try {
-            return reservationRepository.saveAndFlush(reservation);
+            saved = reservationRepository.saveAndFlush(reservation);
         } catch (DataIntegrityViolationException e) {
             // Another concurrent request for the exact same (orderId, productId) won the
             // unique-constraint race after our existence check above; treat this as the
             // same idempotent outcome rather than an error.
             return reservationRepository.findByOrderIdAndProductId(orderId, productId).orElseThrow(() -> e);
         }
+        eventPublisher.publishReserved(new InventoryReservedPayload(saved.getId(), orderId, productId, quantity));
+        return saved;
     }
 
+    /** Same reasoning as {@link #reserveAttempt}: the outbox write is atomic with the release. */
     @Transactional
     public InventoryReservation releaseAttempt(UUID orderId, UUID productId) {
         InventoryReservation reservation = findReservation(orderId, productId);
@@ -90,7 +108,9 @@ public class InventoryReservationOperations {
         inventoryRepository.saveAndFlush(inventory);
 
         reservation.markReleased();
-        return reservationRepository.saveAndFlush(reservation);
+        InventoryReservation saved = reservationRepository.saveAndFlush(reservation);
+        eventPublisher.publishReleased(new InventoryReleasedPayload(saved.getId(), orderId, productId, saved.getQuantity()));
+        return saved;
     }
 
     @Transactional

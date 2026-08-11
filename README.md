@@ -109,7 +109,15 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       release, paid-order-cancellation refund); the whole saga is retry-safe end to
       end because every step is independently idempotent. Order → Payment → Shipment
       remains untriggered until delivery-service exists (Phase 9).
-- [ ] Phase 8 — Transactional outbox
+- [x] **Phase 8 — Transactional outbox**: `OrderEventPublisher`, `InventoryEventPublisher`,
+      and `PaymentEventPublisher` now write an `OutboxEvent` row inside the same
+      transaction as the business change they announce, instead of calling
+      `KafkaTemplate.send()` directly; a separate `@Scheduled` `OutboxPublisher` per
+      service polls `PENDING` rows and actually sends them to Kafka, closing the
+      commit-then-crash-before-publish gap flagged since Phase 6. Publishing moved from
+      controllers into the `@Transactional` service methods themselves (`OrderService`,
+      `PaymentService`, `InventoryReservationOperations`) so the outbox write is
+      genuinely atomic with the change it describes.
 - [ ] Phase 9 — Delivery service
 - [ ] Phase 10 — Notification service
 - [ ] Phase 11 — Resilience4j (circuit breaker, retry, bulkhead, rate limiter)

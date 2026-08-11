@@ -4,7 +4,6 @@ import com.smartdelivery.order.dto.CreateOrderRequest;
 import com.smartdelivery.order.dto.OrderPageResponse;
 import com.smartdelivery.order.dto.OrderResponse;
 import com.smartdelivery.order.dto.OrderStatusResponse;
-import com.smartdelivery.order.event.OrderEventPublisher;
 import com.smartdelivery.order.service.OrderSagaOrchestrator;
 import com.smartdelivery.order.service.OrderService;
 import io.swagger.v3.oas.annotations.tags.Tag;
@@ -32,12 +31,10 @@ import java.util.UUID;
 public class OrderController {
 
     private final OrderService orderService;
-    private final OrderEventPublisher eventPublisher;
     private final OrderSagaOrchestrator sagaOrchestrator;
 
-    public OrderController(OrderService orderService, OrderEventPublisher eventPublisher, OrderSagaOrchestrator sagaOrchestrator) {
+    public OrderController(OrderService orderService, OrderSagaOrchestrator sagaOrchestrator) {
         this.orderService = orderService;
-        this.eventPublisher = eventPublisher;
         this.sagaOrchestrator = sagaOrchestrator;
     }
 
@@ -47,11 +44,9 @@ public class OrderController {
             @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
             @Valid @RequestBody CreateOrderRequest request) {
         UUID userId = currentUserId(authentication);
-        // orderService.create() is @Transactional; by the time it returns, the order is
-        // already committed, so publishing here (not inside that transaction) is what
-        // keeps "the event went out" honestly tied to "the write actually happened."
+        // orderService.create() writes the OrderCreated outbox row in the same
+        // transaction as the order itself (ADR 004) -- see OrderService.create.
         var order = orderService.create(userId, idempotencyKey, request);
-        eventPublisher.publishOrderCreated(order);
         return ResponseEntity.status(HttpStatus.CREATED).body(OrderResponse.from(order));
     }
 
@@ -70,7 +65,6 @@ public class OrderController {
     @PostMapping("/{id}/cancel")
     public ResponseEntity<OrderResponse> cancel(Authentication authentication, @PathVariable UUID id) {
         var result = orderService.cancel(id, currentUserId(authentication), isAdmin(authentication));
-        eventPublisher.publishOrderCancelled(result.order());
         sagaOrchestrator.compensateCancellation(result.order(), result.previousStatus());
         return ResponseEntity.ok(OrderResponse.from(result.order()));
     }

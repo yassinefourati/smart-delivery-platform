@@ -7,6 +7,7 @@ import com.smartdelivery.order.domain.OrderItem;
 import com.smartdelivery.order.domain.OrderStatus;
 import com.smartdelivery.order.dto.CreateOrderRequest;
 import com.smartdelivery.order.dto.OrderItemRequest;
+import com.smartdelivery.order.event.OrderEventPublisher;
 import com.smartdelivery.order.exception.IdempotencyKeyConflictException;
 import com.smartdelivery.order.exception.OrderNotFoundException;
 import com.smartdelivery.order.exception.ProductNotAvailableException;
@@ -26,10 +27,12 @@ public class OrderService {
 
     private final OrderRepository orderRepository;
     private final ProductServiceClient productServiceClient;
+    private final OrderEventPublisher eventPublisher;
 
-    public OrderService(OrderRepository orderRepository, ProductServiceClient productServiceClient) {
+    public OrderService(OrderRepository orderRepository, ProductServiceClient productServiceClient, OrderEventPublisher eventPublisher) {
         this.orderRepository = orderRepository;
         this.productServiceClient = productServiceClient;
+        this.eventPublisher = eventPublisher;
     }
 
     /**
@@ -38,6 +41,10 @@ public class OrderService {
      * of creating a duplicate -- unless the retried request's content actually
      * differs from the first one, which is treated as a real conflict rather than
      * silently returning the wrong order (see RequestFingerprint).
+     *
+     * The outbox write (see OrderEventPublisher) happens inside this same transaction,
+     * only on the actual-creation path -- not on a replayed idempotent hit, which would
+     * otherwise re-announce an order that was already announced the first time.
      */
     @Transactional
     public Order create(UUID userId, String idempotencyKey, CreateOrderRequest request) {
@@ -52,8 +59,9 @@ public class OrderService {
 
         Order order = buildOrder(userId, idempotencyKey, requestHash, request);
 
+        Order saved;
         try {
-            return orderRepository.saveAndFlush(order);
+            saved = orderRepository.saveAndFlush(order);
         } catch (DataIntegrityViolationException e) {
             // Another concurrent request with the exact same (userId, idempotencyKey)
             // won the unique-constraint race after our existence check above.
@@ -63,6 +71,8 @@ public class OrderService {
             Order existing = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey).orElseThrow(() -> e);
             return reconcileReplay(existing, requestHash, idempotencyKey);
         }
+        eventPublisher.publishOrderCreated(saved);
+        return saved;
     }
 
     private Order reconcileReplay(Order existing, String requestHash, String idempotencyKey) {
@@ -103,7 +113,8 @@ public class OrderService {
      * payment) is a separate concern -- see OrderSagaOrchestrator.compensateCancellation,
      * called by OrderController with the {@link OrderCancellationResult#previousStatus()}
      * this method captures, since by the time an Order's status can be read back
-     * it's already CANCELLED.
+     * it's already CANCELLED. The outbox write happens here, inside the same
+     * transaction as the cancellation itself.
      */
     @Transactional
     public OrderCancellationResult cancel(UUID orderId, UUID requestingUserId, boolean isAdmin) {
@@ -112,6 +123,7 @@ public class OrderService {
         OrderStatus previousStatus = order.getStatus();
         order.cancel();
         order.getItems().size(); // force-initialize the lazy collection before the transaction (and session) closes
+        eventPublisher.publishOrderCancelled(order);
         return new OrderCancellationResult(order, previousStatus);
     }
 

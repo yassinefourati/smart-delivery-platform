@@ -44,3 +44,14 @@ mid-publish, because "publish an already-published row again" is a safe duplicat
   later optimization, not required to get correctness) per service that needs it.
 - End-to-end latency for an event to reach Kafka is bounded by the publisher's poll
   interval, not zero — an accepted trade-off for the reliability guarantee.
+
+## Implementation note (Phase 8)
+
+Implemented in order-service, inventory-service, and payment-service exactly as
+described above: an `outbox_events` table per service (`OutboxEvent`/`OutboxStatus`),
+written by `OrderEventPublisher`/`InventoryEventPublisher`/`PaymentEventPublisher` from
+inside the same `@Transactional` method as the business change, and read by a
+`@Scheduled` `OutboxPublisher` (poller, not CDC — see above) that sends to Kafka and
+marks the row `PUBLISHED`. See [kafka-events.md](../kafka-events.md#the-outbox-in-practice)
+and [saga.md](../saga.md#relationship-to-the-outbox-pattern) for how this changed the
+saga's publish path.

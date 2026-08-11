@@ -6,6 +6,7 @@ import com.smartdelivery.order.domain.Order;
 import com.smartdelivery.order.domain.OrderStatus;
 import com.smartdelivery.order.dto.CreateOrderRequest;
 import com.smartdelivery.order.dto.OrderItemRequest;
+import com.smartdelivery.order.event.OrderEventPublisher;
 import com.smartdelivery.order.exception.IdempotencyKeyConflictException;
 import com.smartdelivery.order.exception.InvalidOrderStateTransitionException;
 import com.smartdelivery.order.exception.OrderNotFoundException;
@@ -40,8 +41,11 @@ class OrderServiceTest {
     @Mock
     private ProductServiceClient productServiceClient;
 
+    @Mock
+    private OrderEventPublisher eventPublisher;
+
     private OrderService service() {
-        return new OrderService(orderRepository, productServiceClient);
+        return new OrderService(orderRepository, productServiceClient, eventPublisher);
     }
 
     private CreateOrderRequest requestFor(UUID productId, int quantity) {

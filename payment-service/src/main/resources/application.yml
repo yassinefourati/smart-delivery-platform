@@ -55,6 +55,10 @@ jwt:
 payment:
   decline-threshold: ${PAYMENT_DECLINE_THRESHOLD:10000.00}
 
+# How often OutboxPublisher polls outbox_events for PENDING rows -- see ADR 004.
+outbox:
+  poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:2000}
+
 springdoc:
   swagger-ui:
     path: /swagger-ui.html

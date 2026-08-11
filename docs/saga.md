@@ -120,14 +120,21 @@ charge or a duplicate shipment.
 
 ## Relationship to the outbox pattern
 
-**Not yet using the outbox** (Phase 8). `OrderEventPublisher`,
-`InventoryEventPublisher`, and `PaymentEventPublisher` all call `KafkaTemplate.send()`
-directly after their owning transaction has already committed — a flagged, known gap,
-not a silent one. See [ADR 004](adr/004-outbox-pattern.md) for exactly why a bare
-`send()` isn't fully safe (a crash between commit and publish loses the event
-silently), and [kafka-events.md](kafka-events.md#relationship-to-the-outbox-pattern)
-for the same discussion from the Kafka side. The underlying database change is never
-at risk either way — only the event announcing it.
+**Using the outbox as of Phase 8.** `OrderEventPublisher`, `InventoryEventPublisher`,
+and `PaymentEventPublisher` write an `OutboxEvent` row inside the same transaction as
+the business change they announce (order creation/cancellation, a reservation/release,
+a charge outcome), instead of calling `KafkaTemplate.send()` directly. A separate
+`OutboxPublisher` polls and actually sends to Kafka. This closes the one real gap the
+saga had: a crash between "the reservation committed" and "the event announcing it
+reached Kafka" no longer loses that event silently -- the row survives the crash and
+the next poll (or the next process's first poll, after restart) sends it. See
+[ADR 004](adr/004-outbox-pattern.md) and
+[kafka-events.md](kafka-events.md#the-outbox-in-practice) for the mechanics.
+
+This doesn't change the saga's resumability story from
+[above](#resumability) -- it strengthens it. Resumability already assumed a step's
+*local* transaction was the unit of truth; the outbox just makes "the event announcing
+that transaction" part of that same unit of truth, instead of a best-effort afterthought.
 
 ## Service-to-service authentication
 

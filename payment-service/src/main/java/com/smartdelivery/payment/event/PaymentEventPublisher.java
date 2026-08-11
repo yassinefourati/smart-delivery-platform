@@ -3,42 +3,43 @@ package com.smartdelivery.payment.event;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.kafka.core.KafkaTemplate;
 import org.springframework.stereotype.Component;
 
 import java.time.Instant;
 import java.util.UUID;
 
 /**
- * Publishes payment-lifecycle facts to Kafka after the owning transaction has already
- * committed. Same known gap as order-service's OrderEventPublisher and
- * inventory-service's InventoryEventPublisher: a direct {@code KafkaTemplate.send()},
- * not yet the outbox pattern (ADR 004, Phase 8). A publish failure is logged, not
- * escalated -- the Payment record itself is already correctly persisted either way.
+ * Records payment-lifecycle facts into the transactional outbox (ADR 004) rather than
+ * sending to Kafka directly. Callers must invoke this from inside the same
+ * {@code @Transactional} method that made the business change it announces (see
+ * {@link com.smartdelivery.payment.service.PaymentService}) -- that's what makes "the
+ * payment was saved" and "the outbox row announcing it exists" atomic. The actual Kafka
+ * send happens later, out of band, in {@link OutboxPublisher}.
  */
 @Component
 public class PaymentEventPublisher {
 
     private static final Logger log = LoggerFactory.getLogger(PaymentEventPublisher.class);
     private static final String SOURCE = "payment-service";
+    private static final String AGGREGATE_TYPE = "Payment";
 
-    private final KafkaTemplate<String, String> kafkaTemplate;
+    private final OutboxEventRepository outboxEventRepository;
     private final ObjectMapper objectMapper;
 
-    public PaymentEventPublisher(KafkaTemplate<String, String> kafkaTemplate, ObjectMapper objectMapper) {
-        this.kafkaTemplate = kafkaTemplate;
+    public PaymentEventPublisher(OutboxEventRepository outboxEventRepository, ObjectMapper objectMapper) {
+        this.outboxEventRepository = outboxEventRepository;
         this.objectMapper = objectMapper;
     }
 
     public void publishCompleted(PaymentCompletedPayload payload) {
-        publish(KafkaTopics.PAYMENT_COMPLETED, "PaymentCompleted", payload.orderId(), payload);
+        record(KafkaTopics.PAYMENT_COMPLETED, "PaymentCompleted", payload.orderId(), payload);
     }
 
     public void publishFailed(PaymentFailedPayload payload) {
-        publish(KafkaTopics.PAYMENT_FAILED, "PaymentFailed", payload.orderId(), payload);
+        record(KafkaTopics.PAYMENT_FAILED, "PaymentFailed", payload.orderId(), payload);
     }
 
-    private void publish(String topic, String eventType, UUID key, Object payload) {
+    private void record(String topic, String eventType, UUID aggregateId, Object payload) {
         // A fresh correlationId per publish is a Phase 6 stand-in -- propagating the
         // correlationId that originated the request through to here is Phase 12's job
         // (docs/observability.md).
@@ -50,14 +51,10 @@ public class PaymentEventPublisher {
         try {
             json = objectMapper.writeValueAsString(envelope);
         } catch (Exception e) {
-            log.error("Failed to serialize {} for key {}; event was not published", eventType, key, e);
+            log.error("Failed to serialize {} for aggregate {}; outbox row was not written", eventType, aggregateId, e);
             return;
         }
 
-        kafkaTemplate.send(topic, key.toString(), json).whenComplete((result, ex) -> {
-            if (ex != null) {
-                log.error("Failed to publish {} to topic {} for key {}", eventType, topic, key, ex);
-            }
-        });
+        outboxEventRepository.save(new OutboxEvent(AGGREGATE_TYPE, aggregateId, eventType, topic, json));
     }
 }
