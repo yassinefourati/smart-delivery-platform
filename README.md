@@ -90,8 +90,7 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       machine (guards every transition, not just cancel), product-service price/
       availability snapshotting at creation time, Idempotency-Key support with
       request-fingerprint mismatch detection, ownership-enforced read/cancel/list
-      APIs, unit + Testcontainers integration tests. Saga wiring that actually
-      drives an order past `CREATED` lands in Phases 6-7.
+      APIs, unit + Testcontainers integration tests.
 - [x] **Phase 6 — Kafka**: shared JSON envelope contract (independently duplicated per
       service, not a shared library -- plain-string (de)serialization to avoid
       cross-service Java type-header coupling), real producers (order-service:
@@ -100,7 +99,16 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       by idempotently advancing its own state machine), bounded retry + dead-letter
       topics. Direct `KafkaTemplate.send()` for now, not yet the outbox pattern --
       flagged, fixed in Phase 8.
-- [ ] Phase 7 — Saga orchestration (order → inventory → payment → shipment)
+- [x] **Phase 7 — Saga orchestration**: payment-service built from scratch (mock
+      provider with a deterministic decline threshold, Payment/PaymentTransaction,
+      idempotent per orderId, refund support); `OrderSagaOrchestrator` drives
+      Order → Inventory → Payment via real REST calls (a short-lived internal
+      `SERVICE`-role JWT authenticates them), reusing Phase 6's idempotent transition
+      handlers so the synchronous fast path and the async Kafka backstop can never
+      conflict; full compensation (partial-reservation rollback, payment-decline
+      release, paid-order-cancellation refund); the whole saga is retry-safe end to
+      end because every step is independently idempotent. Order → Payment → Shipment
+      remains untriggered until delivery-service exists (Phase 9).
 - [ ] Phase 8 — Transactional outbox
 - [ ] Phase 9 — Delivery service
 - [ ] Phase 10 — Notification service
@@ -109,11 +117,12 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-`user-service`, `product-service`, `inventory-service`, and `order-service` now have
-real business logic end to end, and order-service/inventory-service talk to each other
-asynchronously over Kafka (not just REST); the remaining services are still minimal
-Spring Boot applications exposing only
-`/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built in the same
+`user-service`, `product-service`, `inventory-service`, `order-service`, and
+`payment-service` now have real business logic end to end. Placing an order actually
+reserves inventory and charges a (mock) payment, asynchronously, with full compensation
+on failure -- see [docs/saga.md](docs/saga.md). `delivery-service` and
+`notification-service` are still minimal Spring Boot applications exposing only
+`/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built the same
 incremental way once their phase starts.
 
 ## License

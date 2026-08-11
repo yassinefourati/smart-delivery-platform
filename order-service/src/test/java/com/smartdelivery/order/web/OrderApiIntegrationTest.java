@@ -66,16 +66,31 @@ class OrderApiIntegrationTest {
         registry.add("jwt.secret", () -> JWT_SECRET);
     }
 
+    /**
+     * Binds the mock server to the {@code RestClient.Builder} bean *inside* the same
+     * {@code @Bean} method that creates it, not in a second method that takes the
+     * builder as a parameter. Two separate methods would only guarantee ordering
+     * between those two beans -- not between "the builder is bound" and "some
+     * unrelated bean like ProductServiceClient asks for the builder and builds its
+     * RestClient from it," since Spring has no reason to prefer creating the binder
+     * bean first. Binding atomically inside the producing method closes that race.
+     */
     @TestConfiguration
     static class RestClientTestConfig {
+        static final java.util.concurrent.atomic.AtomicReference<MockRestServiceServer> SERVER_HOLDER = new java.util.concurrent.atomic.AtomicReference<>();
+
         @Bean
         RestClient.Builder testRestClientBuilder() {
-            return RestClient.builder();
+            RestClient.Builder builder = RestClient.builder();
+            SERVER_HOLDER.set(MockRestServiceServer.bindTo(builder).build());
+            return builder;
         }
 
         @Bean
         MockRestServiceServer mockRestServiceServer(RestClient.Builder builder) {
-            return MockRestServiceServer.bindTo(builder).build();
+            // 'builder' param only forces this bean to be created after
+            // testRestClientBuilder(), so SERVER_HOLDER is guaranteed populated.
+            return SERVER_HOLDER.get();
         }
     }
 

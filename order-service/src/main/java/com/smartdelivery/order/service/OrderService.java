@@ -4,6 +4,7 @@ import com.smartdelivery.order.client.ProductServiceClient;
 import com.smartdelivery.order.client.ProductSnapshot;
 import com.smartdelivery.order.domain.Order;
 import com.smartdelivery.order.domain.OrderItem;
+import com.smartdelivery.order.domain.OrderStatus;
 import com.smartdelivery.order.dto.CreateOrderRequest;
 import com.smartdelivery.order.dto.OrderItemRequest;
 import com.smartdelivery.order.exception.IdempotencyKeyConflictException;
@@ -98,19 +99,20 @@ public class OrderService {
 
     /**
      * Flips the order to CANCELLED if -- and only if -- it's still in a cancellable
-     * state (see OrderStatus). This does not yet trigger compensation (releasing a
-     * reservation, refunding a payment) for orders that had already progressed past
-     * CREATED; that requires publishing an OrderCancelled event for inventory-service
-     * and payment-service to react to, which is Phase 6/7's job (docs/saga.md). Today,
-     * only CREATED orders can realistically reach this method's success path, since
-     * nothing yet advances an order past CREATED.
+     * state (see OrderStatus). Compensation (releasing a reservation, refunding a
+     * payment) is a separate concern -- see OrderSagaOrchestrator.compensateCancellation,
+     * called by OrderController with the {@link OrderCancellationResult#previousStatus()}
+     * this method captures, since by the time an Order's status can be read back
+     * it's already CANCELLED.
      */
     @Transactional
-    public Order cancel(UUID orderId, UUID requestingUserId, boolean isAdmin) {
+    public OrderCancellationResult cancel(UUID orderId, UUID requestingUserId, boolean isAdmin) {
         Order order = fetch(orderId);
         assertOwnerOrAdmin(order, requestingUserId, isAdmin);
+        OrderStatus previousStatus = order.getStatus();
         order.cancel();
-        return order;
+        order.getItems().size(); // force-initialize the lazy collection before the transaction (and session) closes
+        return new OrderCancellationResult(order, previousStatus);
     }
 
     private Order fetch(UUID orderId) {

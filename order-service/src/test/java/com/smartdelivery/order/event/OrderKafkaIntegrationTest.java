@@ -80,16 +80,25 @@ class OrderKafkaIntegrationTest {
         registry.add("jwt.secret", () -> JWT_SECRET);
     }
 
+    /**
+     * See OrderApiIntegrationTest.RestClientTestConfig's Javadoc for why binding
+     * happens inside the same {@code @Bean} method that creates the builder, not in a
+     * second method that merely takes it as a parameter.
+     */
     @TestConfiguration
     static class RestClientTestConfig {
+        static final java.util.concurrent.atomic.AtomicReference<MockRestServiceServer> SERVER_HOLDER = new java.util.concurrent.atomic.AtomicReference<>();
+
         @Bean
         RestClient.Builder testRestClientBuilder() {
-            return RestClient.builder();
+            RestClient.Builder builder = RestClient.builder();
+            SERVER_HOLDER.set(MockRestServiceServer.bindTo(builder).build());
+            return builder;
         }
 
         @Bean
         MockRestServiceServer mockRestServiceServer(RestClient.Builder builder) {
-            return MockRestServiceServer.bindTo(builder).build();
+            return SERVER_HOLDER.get();
         }
     }
 

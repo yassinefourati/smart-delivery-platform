@@ -5,6 +5,7 @@ import com.smartdelivery.order.dto.OrderPageResponse;
 import com.smartdelivery.order.dto.OrderResponse;
 import com.smartdelivery.order.dto.OrderStatusResponse;
 import com.smartdelivery.order.event.OrderEventPublisher;
+import com.smartdelivery.order.service.OrderSagaOrchestrator;
 import com.smartdelivery.order.service.OrderService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -32,10 +33,12 @@ public class OrderController {
 
     private final OrderService orderService;
     private final OrderEventPublisher eventPublisher;
+    private final OrderSagaOrchestrator sagaOrchestrator;
 
-    public OrderController(OrderService orderService, OrderEventPublisher eventPublisher) {
+    public OrderController(OrderService orderService, OrderEventPublisher eventPublisher, OrderSagaOrchestrator sagaOrchestrator) {
         this.orderService = orderService;
         this.eventPublisher = eventPublisher;
+        this.sagaOrchestrator = sagaOrchestrator;
     }
 
     @PostMapping
@@ -66,9 +69,10 @@ public class OrderController {
 
     @PostMapping("/{id}/cancel")
     public ResponseEntity<OrderResponse> cancel(Authentication authentication, @PathVariable UUID id) {
-        var order = orderService.cancel(id, currentUserId(authentication), isAdmin(authentication));
-        eventPublisher.publishOrderCancelled(order);
-        return ResponseEntity.ok(OrderResponse.from(order));
+        var result = orderService.cancel(id, currentUserId(authentication), isAdmin(authentication));
+        eventPublisher.publishOrderCancelled(result.order());
+        sagaOrchestrator.compensateCancellation(result.order(), result.previousStatus());
+        return ResponseEntity.ok(OrderResponse.from(result.order()));
     }
 
     @GetMapping("/user/{userId}")

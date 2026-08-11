@@ -174,9 +174,10 @@ class OrderServiceTest {
         Order order = orderWithStatus(ownerId, OrderStatus.CREATED);
         when(orderRepository.findById(order.getId())).thenReturn(Optional.of(order));
 
-        Order result = service.cancel(order.getId(), ownerId, false);
+        OrderCancellationResult result = service.cancel(order.getId(), ownerId, false);
 
-        assertThat(result.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        assertThat(result.order().getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        assertThat(result.previousStatus()).isEqualTo(OrderStatus.CREATED);
     }
 
     @Test

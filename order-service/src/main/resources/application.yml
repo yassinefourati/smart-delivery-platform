@@ -61,6 +61,10 @@ jwt:
 services:
   product-service:
     base-url: ${PRODUCT_SERVICE_URI:http://localhost:8082}
+  inventory-service:
+    base-url: ${INVENTORY_SERVICE_URI:http://localhost:8083}
+  payment-service:
+    base-url: ${PAYMENT_SERVICE_URI:http://localhost:8085}
 
 springdoc:
   swagger-ui:

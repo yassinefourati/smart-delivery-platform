@@ -56,6 +56,27 @@ customer requesting someone else's `userId` gets `403 Forbidden`, not their data
 are the one role explicitly allowed to pass an arbitrary `userId`, and that's enforced
 by role check, not by trusting the path variable.
 
+## Service-to-service authentication (SERVICE role)
+
+The order Saga (Phase 7) needs order-service to call inventory-service (reserve/
+release/deduct) and payment-service (charge/refund) — endpoints that must not be open
+to arbitrary customer JWTs. There's no dedicated service-identity system in this
+platform yet, so `InternalServiceTokenProvider` (in order-service) mints a short-lived
+(60s) JWT with a role of `SERVICE`, signed with the same shared HS256 secret every
+service already trusts. Inventory-service and payment-service accept `SERVICE`
+alongside `ADMIN`/`WAREHOUSE_MANAGER` on exactly the endpoints the saga calls — nowhere
+else (e.g. `SERVICE` cannot create a warehouse).
+
+This is genuinely functional, not a stub: any service holding the shared secret really
+can mint a token another service will accept. It's also, honestly, a weaker guarantee
+than a real service-to-service identity system (e.g. OAuth2 client-credentials against
+a dedicated identity provider, where each service has its own distinct, revocable
+credential) would give — recorded here as a known simplification, in the same spirit
+as the HS256-vs-RS256 trade-off above, rather than presented as the final design. If
+this were revisited, both would likely move together: RS256 signing keys per issuer,
+and a real client-credentials grant per calling service instead of a shared mintable
+secret.
+
 ## Transport and secrets
 
 - No password, JWT, or card-like payment data is ever written to application logs
