@@ -1,6 +1,29 @@
 spring:
   application:
     name: payment-service
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/payment_db}
+    username: ${DB_USERNAME:sdp}
+    password: ${DB_PASSWORD:sdp_local_dev_only}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+  kafka:
+    bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
+    # Plain JSON strings, not Java-type-headered objects -- see docs/kafka-events.md
+    # and PaymentEventPublisher.
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.apache.kafka.common.serialization.StringSerializer
+      acks: all
 
 server:
   port: 8085
@@ -21,3 +44,17 @@ info:
   app:
     name: payment-service
     description: Mock payment processing service
+
+# Must match user-service's jwt.secret -- see docs/security.md. Local-dev-only default;
+# every non-local environment MUST override this via the JWT_SECRET env var.
+jwt:
+  secret: ${JWT_SECRET:local-dev-only-secret-key-do-not-use-in-production-min-32-bytes}
+
+# Any charge at or above this amount is deterministically declined by MockPaymentProvider
+# -- see its Javadoc. Deliberately high so ordinary test/demo amounts succeed.
+payment:
+  decline-threshold: ${PAYMENT_DECLINE_THRESHOLD:10000.00}
+
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html

@@ -178,6 +178,11 @@ services:
     container_name: sdp-inventory-service
     ports:
       - "8083:8083"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/inventory_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
       postgres:
         condition: service_healthy
@@ -198,10 +203,24 @@ services:
     container_name: sdp-order-service
     ports:
       - "8084:8084"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/order_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
+      PRODUCT_SERVICE_URI: http://product-service:8082
+      INVENTORY_SERVICE_URI: http://inventory-service:8083
+      PAYMENT_SERVICE_URI: http://payment-service:8085
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
       postgres:
         condition: service_healthy
       kafka:
+        condition: service_healthy
+      product-service:
+        condition: service_healthy
+      inventory-service:
+        condition: service_healthy
+      payment-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8084/actuator/health"]
@@ -218,6 +237,11 @@ services:
     container_name: sdp-payment-service
     ports:
       - "8085:8085"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/payment_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
       postgres:
         condition: service_healthy
