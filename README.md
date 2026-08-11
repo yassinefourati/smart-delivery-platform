@@ -1,5 +1,7 @@
 # Smart Delivery Platform
 
+[![CI](https://github.com/yassinefourati/smart-delivery-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/yassinefourati/smart-delivery-platform/actions/workflows/ci.yml)
+
 A microservices-based smart logistics and delivery management platform — a simplified
 combination of Amazon-style logistics and food-delivery systems. Customers browse
 products, place orders, pay, and track delivery; warehouse managers control inventory;
@@ -66,6 +68,8 @@ mvn clean install
 - [Database design](docs/database-design.md)
 - [Security](docs/security.md)
 - [Observability](docs/observability.md)
+- [Testing](docs/testing.md)
+- [CI/CD](docs/ci-cd.md)
 - [Local development](docs/local-development.md)
 - [Architecture Decision Records](docs/adr)
 
@@ -179,8 +183,33 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       correlation id explicitly instead. See [docs/observability.md](docs/observability.md),
       including its disclosed verification caveat: Docker is unavailable in this sandbox,
       so the compose stack's dashboards were never actually rendered against live data.
-- [ ] Phase 13 — Integration test suite (Testcontainers)
-- [ ] Phase 14 — CI/CD
+- [x] **Phase 13 — Integration test suite**: an audit, not a rebuild -- every service
+      phase since Phase 4 already built its own Testcontainers integration coverage as
+      it went (real Postgres and/or Kafka, not mocks), including a genuine concurrency
+      test (inventory-service, two threads racing for the last unit of stock at a
+      `CyclicBarrier`) and a real end-to-end saga test over a live Kafka broker
+      (order-service). The one real gap this phase closed: api-gateway had only a
+      context-load smoke test. `ApiGatewayRoutingIntegrationTest` now starts the actual
+      gateway and proves its routing table and `CorrelationIdGlobalFilter` against an
+      embedded stub HTTP server (no new dependency, no Testcontainers needed --
+      api-gateway has no database or broker of its own). See
+      [docs/testing.md](docs/testing.md), including its disclosed caveat: Docker is
+      unavailable in this sandbox, so most `*IntegrationTest` classes are verified to
+      compile and pass in CI, not run to completion here -- only the two integration
+      tests needing no containers (this new one and `ResilienceIntegrationTest`) have
+      actually been executed and confirmed passing in this environment.
+- [x] **Phase 14 — CI/CD**: `docker-build` now publishes each service's image to GHCR
+      (`ghcr.io/yassinefourati/smart-delivery-platform/<service>:latest` and
+      `:<commit-sha>`), gated to only fire on a push to `main` -- a PR (including one
+      from a fork) still gets a real build, proving the `Dockerfile` works, but never
+      publishes. Uses the workflow's own `GITHUB_TOKEN`, no extra secret needed, scoped
+      to `packages: write` at the job level only. Added `.github/dependabot.yml` (weekly
+      Maven, Docker base image, and GitHub Actions updates) and a CI status badge to
+      this README. No deploy step: there's no Kubernetes manifest, Helm chart, or cloud
+      environment anywhere in this repository to deploy *to* -- see
+      [docs/ci-cd.md](docs/ci-cd.md) for that scoping decision, made the same way
+      Phase 12's Kafka-lag panel and Phase 1's static analysis were deferred rather than
+      built against nothing real.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be
