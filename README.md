@@ -74,7 +74,9 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 
 - [x] **Phase 1 — Foundation**: multi-module Maven build, Docker Compose environment
       (Postgres/Kafka/Redis + all service skeletons), architecture documentation.
-- [ ] Phase 2 — User service (auth, JWT, roles, addresses)
+- [x] **Phase 2 — User service**: registration, JWT login, BCrypt password hashing,
+      role-based + ownership-based endpoint authorization, address book CRUD, Flyway
+      schema, unit + Testcontainers integration tests.
 - [ ] Phase 3 — Product service (catalog, search, Redis cache)
 - [ ] Phase 4 — Inventory service (reservation, optimistic locking)
 - [ ] Phase 5 — Order service (state machine, idempotency)
@@ -88,10 +90,10 @@ Built incrementally; each milestone lands only after it builds and its tests pas
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-Currently every service is a minimal Spring Boot application exposing
-`/actuator/health`, `/actuator/info`, and `/actuator/metrics` — no business logic yet.
-This proves the build, containerization, and orchestration are correct before any
-domain code is added on top.
+`user-service` now has real business logic end to end (registration, JWT auth,
+authorization, addresses); the remaining services are still minimal Spring Boot
+applications exposing only `/actuator/health`, `/actuator/info`, and
+`/actuator/metrics`, built in the same incremental way once their phase starts.
 
 ## License
 

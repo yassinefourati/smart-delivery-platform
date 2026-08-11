@@ -126,6 +126,10 @@ services:
     container_name: sdp-user-service
     ports:
       - "8081:8081"
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/user_db
+      DB_USERNAME: sdp
+      DB_PASSWORD: sdp_local_dev_only
     depends_on:
       postgres:
         condition: service_healthy
