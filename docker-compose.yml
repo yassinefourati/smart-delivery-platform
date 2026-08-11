@@ -287,9 +287,9 @@ services:
     container_name: sdp-notification-service
     ports:
       - "8087:8087"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
-      postgres:
-        condition: service_healthy
       kafka:
         condition: service_healthy
     healthcheck:

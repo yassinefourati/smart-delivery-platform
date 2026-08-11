@@ -32,7 +32,7 @@ spring:
             - id: delivery-service
               uri: ${DELIVERY_SERVICE_URI:http://localhost:8086}
               predicates:
-                - Path=/api/v1/shipments/**,/api/v1/delivery-agents/**
+                - Path=/api/v1/agents/**,/api/v1/shipments/**,/api/v1/deliveries/**
 
 server:
   port: 8080

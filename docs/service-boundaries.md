@@ -51,7 +51,11 @@ that link rather than verifying it synchronously (see [security.md](security.md)
 ### `notification-service`
 Owns nothing that other services need — it's a pure Kafka consumer that renders and
 "sends" (logs, in development) notifications. Has no public REST API for other services
-to call.
+to call, no database, and publishes nothing of its own (Phase 10): it's the one service
+whose entire job is being the last consumer of every topic in the catalog, never a
+producer. `NotificationSender` is the clearly-labeled mock boundary a real deployment
+would replace with an email/SMS/push provider call, the same pattern
+`MockPaymentProvider` uses for payments.
 
 ### `api-gateway`
 Owns nothing. Stateless routing layer; the only service a browser/mobile client talks
@@ -70,7 +74,7 @@ to directly.
 | payment-service | Kafka (`payment.*`) | publish | order-service (saga), delivery-service, and notification-service react |
 | delivery-service | Kafka (`payment.completed`) | consume | create a shipment once an order is paid |
 | delivery-service | Kafka (`shipment.*`, `delivery.*`) | publish | order-service (saga) and notification-service react |
-| notification-service | Kafka (all topics above) | consume only | never calls another service back |
+| notification-service | Kafka (all 10 topics above) | consume only | renders and logs a notification per event; never calls another service back |
 
 No row reads "Service X → Service Y direct SQL." That row does not exist by design.
 

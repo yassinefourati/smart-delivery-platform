@@ -130,20 +130,32 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       Publishes `shipment.created`/`delivery.assigned`/`delivery.completed`, which
       order-service has consumed since Phase 6 without needing any change here -- the
       saga's Payment → Shipment → Delivery leg is real end to end for the first time.
-- [ ] Phase 10 — Notification service
+- [x] **Phase 10 — Notification service**: the platform's other consumer of every topic
+      in the catalog (10, alongside order-service's subset) -- and the only service that
+      publishes none of its own. No database, no REST API, no Spring Security: nothing
+      calls it and it owns no data (see docs/service-boundaries.md). `NotificationEventListener`
+      renders each event into a human-readable line, delegated to `NotificationSender`
+      (the mock boundary, logs at `INFO`; a real deployment would call an email/SMS/push
+      provider here, same pattern as `MockPaymentProvider`). Found and fixed a real,
+      previously-latent bug while building this: a monetary `BigDecimal` round-tripped
+      through an envelope's untyped `JsonNode` payload doesn't reliably keep its original
+      scale, so rendering one for a human now always uses explicit `%.2f` formatting
+      instead of the value's own (unreliable) `toString()` -- see docs/kafka-events.md.
 - [ ] Phase 11 — Resilience4j (circuit breaker, retry, bulkhead, rate limiter)
 - [ ] Phase 12 — Observability (Prometheus, Grafana, OpenTelemetry, correlation IDs)
 - [ ] Phase 13 — Integration test suite (Testcontainers)
 - [ ] Phase 14 — CI/CD
 
-`user-service`, `product-service`, `inventory-service`, `order-service`,
-`payment-service`, and `delivery-service` now have real business logic end to end.
-Placing an order actually reserves inventory, charges a (mock) payment, creates a
-shipment, and can be carried through assignment and delivery by a real agent -- with
-full compensation on failure up through payment -- see [docs/saga.md](docs/saga.md).
-`notification-service` is still a minimal Spring Boot application exposing only
-`/actuator/health`, `/actuator/info`, and `/actuator/metrics`, built the same
-incremental way once its phase starts.
+All eight backend services now have real business logic end to end. Placing an order
+actually reserves inventory, charges a (mock) payment, creates a shipment, can be
+carried through assignment and delivery by a real agent, and generates a logged
+notification at every step along the way -- with full compensation on failure up
+through payment -- see [docs/saga.md](docs/saga.md). `api-gateway` has routed to every
+service's real API since each was built (it owns no business logic of its own by
+design -- see [docs/architecture.md](docs/architecture.md)); its delivery-service route
+predicates were corrected this phase to match the real `/api/v1/agents`,
+`/api/v1/shipments`, and `/api/v1/deliveries` paths built in Phase 9, which the
+placeholder route from before that phase existed didn't match.
 
 ## License
 
