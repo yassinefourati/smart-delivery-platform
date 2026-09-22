@@ -291,6 +291,42 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       panels -- `saga.stuck.count` is the one that matters, since nothing else here could
       show an order that had quietly stopped. See
       [ADR 008](docs/adr/008-reliable-compensation-and-stuck-saga-reaper.md).
+- [x] **Phase 18 — Quality gates and an end-to-end smoke test**: everything here exists to
+      catch a class of bug the existing tests structurally could not. **JaCoCo** floors are
+      *measured, not chosen* — the full suite was run, per-module line coverage read off the
+      report, and each floor set to that number rounded down (87-96%, see
+      [docs/ci-cd.md](docs/ci-cd.md#line-coverage-jacoco)); the gate's job is "do not go
+      backwards", not "reach 80%". **SpotBugs** at `Max`/`Medium` produced 88 findings: 87
+      `EI_EXPOSE_REP` and one `CT_CONSTRUCTOR_THROW` are excluded as whole categories with
+      written justifications in `spotbugs-exclude.xml` (never per class, so a genuine new
+      instance still surfaces), because defensive-copying Spring-injected collaborators and
+      Hibernate-managed collections would break the frameworks this is built on. The 88th was
+      real and is fixed: `PaymentServiceClient` dereferenced the response body without a null
+      check, so a 2xx with an empty body would have been read as a *failed* charge and
+      compensated — releasing stock for an order that may well have been charged. **ArchUnit**
+      rules in every service pin the layering, the important one being that only `event`
+      packages may touch `KafkaTemplate` — the rule that keeps the outbox from being bypassed.
+      notification-service gets bespoke rules rather than `allowEmptyShould`, which would have
+      turned "matched no classes" into a silent pass for the other six. **Trivy** scans each
+      image before it can be published, failing on CRITICAL only and deliberately so
+      ([why](docs/ci-cd.md#why-critical-only)). Finally, `scripts/e2e-smoke.sh` drives the real
+      compose stack **through the gateway only** — register, log in, stock a product, place an
+      order and follow it to `PAID`, replay the `Idempotency-Key` and get the same order, blow
+      past available stock and watch the reservations come back, cancel a paid order and watch
+      the payment refund — dumping `docker compose logs` as a CI artifact when it fails. That
+      required a first admin to exist, so user-service gained a `BootstrapAdminInitializer`
+      gated on two environment variables being set (deliberately *not* declared in
+      `application.yml`, since `@ConditionalOnProperty` reads a blank value as present).
+      Running it found **two more pre-existing bugs**, neither caused by this phase and
+      neither catchable by any test that existed before it: none of the eight jars were
+      executable — the build imports the Spring Boot BOM instead of inheriting from
+      `spring-boot-starter-parent`, so `spring-boot-maven-plugin` had no `repackage`
+      execution and every published image would have died with `no main manifest attribute`,
+      which CI never noticed because `docker-build` only ever *built* images and never started
+      one — and `/api/v1/warehouses/**` had never been routed through the gateway at all, so
+      warehouse management only worked if you bypassed the front door. Both fixed, both
+      covered. See [docs/ci-cd.md](docs/ci-cd.md) and
+      [docs/testing.md](docs/testing.md#two-more-pre-existing-bugs-found-in-phase-18).
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

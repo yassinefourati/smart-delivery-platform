@@ -15,6 +15,11 @@
     <name>api-gateway</name>
     <description>Edge API Gateway routing client traffic to backend microservices</description>
 
+    <properties>
+        <!-- Measured at 87.50% line coverage over the full suite (Phase 18), rounded down. -->
+        <jacoco.line.coverage.minimum>0.87</jacoco.line.coverage.minimum>
+    </properties>
+
     <dependencies>
         <dependency>
             <groupId>org.springframework.cloud</groupId>

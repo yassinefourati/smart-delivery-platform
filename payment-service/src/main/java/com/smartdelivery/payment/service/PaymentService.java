@@ -66,6 +66,19 @@ public class PaymentService {
         return paymentRepository.findById(id).orElseThrow(() -> PaymentNotFoundException.byId(id));
     }
 
+    /**
+     * Looks a payment up by the order it belongs to. order-service knows an order id, not
+     * a payment id, so without this there is no way for a caller to ask "was this order
+     * actually refunded?" -- which is exactly what the end-to-end smoke test needs to
+     * assert, and what an operator would want during an incident. The repository has had
+     * the lookup since Phase 7; only the way in was missing.
+     */
+    @Transactional(readOnly = true)
+    public Payment getByOrderId(UUID orderId) {
+        return paymentRepository.findByOrderId(orderId)
+                .orElseThrow(() -> PaymentNotFoundException.byOrderId(orderId));
+    }
+
     @Transactional
     public Payment refund(RefundRequest request) {
         Payment payment = paymentRepository.findByOrderId(request.orderId())

@@ -98,6 +98,32 @@ class ApiGatewayRoutingIntegrationTest {
         assertThat(awaitCapturedRequest().path()).isEqualTo("/api/v1/products/" + productId);
     }
 
+    /**
+     * Both paths inventory-service actually serves, because only one of them was routed
+     * until Phase 18: {@code /api/v1/warehouses/**} was missing, so warehouse management
+     * was unreachable for any client coming through the front door. A route that exists
+     * for five of six services is the kind of gap that survives review precisely because
+     * nothing looks wrong.
+     */
+    @Test
+    void routesBothInventoryAndWarehousePathsToInventoryService() throws InterruptedException {
+        UUID productId = UUID.randomUUID();
+
+        client.get().uri("/api/v1/inventory/" + productId).exchange().expectStatus().isOk();
+        assertThat(awaitCapturedRequest().path()).isEqualTo("/api/v1/inventory/" + productId);
+
+        client.get().uri("/api/v1/warehouses").exchange().expectStatus().isOk();
+        assertThat(awaitCapturedRequest().path()).isEqualTo("/api/v1/warehouses");
+    }
+
+    /** The JWKS is public by design (ADR 007) and has to be reachable through the gateway. */
+    @Test
+    void routesTheJwksEndpointToUserService() throws InterruptedException {
+        client.get().uri("/.well-known/jwks.json").exchange().expectStatus().isOk();
+
+        assertThat(awaitCapturedRequest().path()).isEqualTo("/.well-known/jwks.json");
+    }
+
     @Test
     void routesOrderPathsToOrderService() throws InterruptedException {
         UUID orderId = UUID.randomUUID();

@@ -84,6 +84,13 @@ jwt:
   service-clients:
     order-service: ${ORDER_SERVICE_CLIENT_SECRET:local-dev-only-order-service-secret}
 
+# NOTE: bootstrap.admin.email / bootstrap.admin.password are deliberately NOT declared
+# here. Setting both (as BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD env vars, which
+# Spring binds to those names) is the opt-in that creates a startup ADMIN account; a
+# declaration with an empty default would make the property *present but blank*, which
+# @ConditionalOnProperty treats as set. docker-compose.yml supplies them for the local
+# stack and the end-to-end smoke test. See BootstrapAdminInitializer and docs/security.md.
+
 springdoc:
   swagger-ui:
     path: /swagger-ui.html

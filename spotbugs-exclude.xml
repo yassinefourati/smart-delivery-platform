@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs findings this codebase deliberately accepts (Phase 18). Everything not listed
+  here is fixed in the code rather than filtered out; this file is the "explicitly
+  justify" half of that rule, and each entry says what the detector sees and why it is
+  not a defect here.
+
+  Deliberately narrow: only whole bug patterns whose premise does not hold for a Spring
+  application are excluded, never individual classes or methods. Suppressing one call
+  site is how a real finding gets lost.
+-->
+<FindBugsFilter>
+
+    <!--
+      EI_EXPOSE_REP / EI_EXPOSE_REP2: "this constructor stores, or this getter returns, an
+      externally mutable object".
+
+      The detector's premise is defensive copying in a library that hands objects to
+      untrusted callers. Nearly every hit here is one of three patterns that are correct
+      as written:
+
+        * Constructor-injected Spring collaborators (a @Service holding its repository, a
+          @RestController holding its service). Sharing that instance is the entire point
+          of dependency injection; copying it would be meaningless, and in most cases the
+          type is a proxy that cannot be copied at all.
+        * JPA entities holding their associations (Address -> User, Order -> items). A
+          managed entity graph is shared by design; a defensive copy would detach it from
+          the persistence context and silently stop changes being written.
+        * Records carrying a collection (UserResponse.roles, JwtProperties.serviceClients).
+          These are immutable value carriers built once from data the application itself
+          produced, and the collections passed in are already unmodifiable or immediately
+          discarded by the caller.
+
+      Excluded as a pattern rather than case by case, because with 87 hits and no real
+      defects among them the only thing per-case suppression would achieve is hiding the
+      88th, which might be genuine.
+    -->
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!--
+      CT_CONSTRUCTOR_THROW: "an exception thrown from a constructor leaves a partially
+      initialized object open to a finalizer attack".
+
+      The attack needs a finalizer, and requires an attacker able to subclass the type
+      inside this JVM. Nothing in this codebase declares finalize(), the classes flagged
+      are final-by-convention Spring beans constructed by the container, and finalization
+      has been deprecated for removal since Java 18.
+
+      The one hit is JwtKeyProvider, which throws when the configured signing key cannot
+      be parsed. Refusing to start on unusable key material is exactly what it should do
+      (ADR 007): the alternative is a service that starts happily and issues tokens
+      nobody can verify.
+    -->
+    <Match>
+        <Bug pattern="CT_CONSTRUCTOR_THROW"/>
+    </Match>
+
+</FindBugsFilter>

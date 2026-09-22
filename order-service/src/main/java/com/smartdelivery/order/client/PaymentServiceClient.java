@@ -9,6 +9,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientException;
 
 import java.math.BigDecimal;
 import java.util.Map;
@@ -56,6 +57,13 @@ public class PaymentServiceClient {
                 .retrieve()
                 .body(PaymentApiResponse.class);
 
+        if (response == null) {
+            // A 2xx with no body is not a decline and must not be read as one: treating it
+            // as a failed charge would release stock for an order that may well have been
+            // charged. Thrown instead, so the saga's existing retry and dead-letter path
+            // deals with it (SpotBugs NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE, Phase 18).
+            throw new RestClientException("payment-service returned an empty body for order " + orderId);
+        }
         return new PaymentChargeResult(response.id(), "SUCCESS".equals(response.status()));
     }
 
