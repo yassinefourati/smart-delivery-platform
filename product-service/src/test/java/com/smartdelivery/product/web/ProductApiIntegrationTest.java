@@ -5,8 +5,7 @@ import com.smartdelivery.product.domain.Category;
 import com.smartdelivery.product.domain.Product;
 import com.smartdelivery.product.repository.CategoryRepository;
 import com.smartdelivery.product.repository.ProductRepository;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
+import com.smartdelivery.product.security.TestJwtIssuer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -20,11 +19,7 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
-import javax.crypto.SecretKey;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -52,8 +47,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers
 class ProductApiIntegrationTest {
 
-    private static final String JWT_SECRET = "integration-test-secret-key-must-be-at-least-32-bytes";
-    private static final SecretKey SIGNING_KEY = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
+    /**
+     * Stands in for user-service: a real JWKS endpoint over HTTP, so these tests
+     * exercise the same key-fetch-and-select path production does (ADR 007).
+     */
+    private static final TestJwtIssuer JWT_ISSUER = new TestJwtIssuer();
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -68,7 +66,9 @@ class ProductApiIntegrationTest {
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.data.redis.host", redis::getHost);
         registry.add("spring.data.redis.port", () -> redis.getMappedPort(6379));
-        registry.add("jwt.secret", () -> JWT_SECRET);
+        registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", JWT_ISSUER::jwkSetUri);
+        registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TestJwtIssuer.ISSUER);
+        registry.add("spring.security.oauth2.resourceserver.jwt.audiences", () -> TestJwtIssuer.AUDIENCE);
     }
 
     @Autowired
@@ -84,14 +84,7 @@ class ProductApiIntegrationTest {
     private ProductRepository productRepository;
 
     private String tokenWithRole(String role) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-                .subject(UUID.randomUUID().toString())
-                .claim("roles", List.of(role))
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plusSeconds(3600)))
-                .signWith(SIGNING_KEY)
-                .compact();
+        return JWT_ISSUER.token(UUID.randomUUID(), role);
     }
 
     private String adminToken() {
@@ -255,5 +248,38 @@ class ProductApiIntegrationTest {
         mockMvc.perform(delete("/api/v1/categories/{id}", category.getId())
                         .header("Authorization", "Bearer " + adminToken()))
                 .andExpect(status().isConflict());
+    }
+
+    // --- Phase 16: this service can verify a token but could never mint one (ADR 007) ---
+
+    /**
+     * The vulnerability Phase 16 closed, asserted from the outside: this token is signed
+     * with the HMAC secret every service used to hold, and it claims ADMIN. Before this
+     * phase, product-service would have accepted it -- and could have produced it.
+     */
+    @Test
+    void aTokenSignedWithTheOldSharedHmacSecretIsRejected() throws Exception {
+        mockMvc.perform(post("/api/v1/categories")
+                        .header("Authorization", "Bearer " + JWT_ISSUER.legacyHmacToken(UUID.randomUUID(), "ADMIN"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of("name", "Forged", "description", "d"))))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void anUnsignedOrUnknownKeyTokenIsRejected() throws Exception {
+        UUID subject = UUID.randomUUID();
+        for (String token : List.of(
+                JWT_ISSUER.unsignedToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenSignedByAnUnpublishedKey(subject, "ADMIN"),
+                JWT_ISSUER.expiredToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenFromAnotherIssuer(subject, "ADMIN"),
+                JWT_ISSUER.tamperedToken(subject))) {
+            mockMvc.perform(post("/api/v1/categories")
+                            .header("Authorization", "Bearer " + token)
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content(objectMapper.writeValueAsString(Map.of("name", "Forged", "description", "d"))))
+                    .andExpect(status().isUnauthorized());
+        }
     }
 }

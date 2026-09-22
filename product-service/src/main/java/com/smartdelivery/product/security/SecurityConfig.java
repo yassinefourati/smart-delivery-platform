@@ -7,8 +7,8 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
 import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
 
 /**
  * The product catalog is publicly readable (browsing doesn't require an account);
@@ -26,17 +26,17 @@ public class SecurityConfig {
 
     private static final String[] CATALOG_PATHS = {"/api/v1/products/**", "/api/v1/categories/**"};
 
-    private final JwtAuthenticationFilter jwtAuthenticationFilter;
     private final JwtAuthenticationEntryPoint jwtAuthenticationEntryPoint;
     private final JwtAccessDeniedHandler jwtAccessDeniedHandler;
+    private final JwtAuthenticationConverter jwtAuthenticationConverter;
 
     public SecurityConfig(
-            JwtAuthenticationFilter jwtAuthenticationFilter,
             JwtAuthenticationEntryPoint jwtAuthenticationEntryPoint,
-            JwtAccessDeniedHandler jwtAccessDeniedHandler) {
-        this.jwtAuthenticationFilter = jwtAuthenticationFilter;
+            JwtAccessDeniedHandler jwtAccessDeniedHandler,
+            JwtAuthenticationConverter jwtAuthenticationConverter) {
         this.jwtAuthenticationEntryPoint = jwtAuthenticationEntryPoint;
         this.jwtAccessDeniedHandler = jwtAccessDeniedHandler;
+        this.jwtAuthenticationConverter = jwtAuthenticationConverter;
     }
 
     @Bean
@@ -52,7 +52,16 @@ public class SecurityConfig {
                 .exceptionHandling(handling -> handling
                         .authenticationEntryPoint(jwtAuthenticationEntryPoint)
                         .accessDeniedHandler(jwtAccessDeniedHandler))
-                .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
+                // Standard Spring Security resource server, replacing the hand-rolled
+                // JwtAuthenticationFilter and JwtService deleted in Phase 16 (ADR 007):
+                // tokens are now verified against user-service's published RSA public key,
+                // so this service can check a token but could never mint one. The existing
+                // entry point and access-denied handler are wired straight in, so the JSON
+                // body of a 401 or 403 is byte-for-byte what it was before.
+                .oauth2ResourceServer(oauth2 -> oauth2
+                        .authenticationEntryPoint(jwtAuthenticationEntryPoint)
+                        .accessDeniedHandler(jwtAccessDeniedHandler)
+                        .jwt(jwt -> jwt.jwtAuthenticationConverter(jwtAuthenticationConverter)));
 
         return http.build();
     }

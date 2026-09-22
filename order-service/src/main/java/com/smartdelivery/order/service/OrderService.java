@@ -126,7 +126,6 @@ public class OrderService {
         assertOwnerOrAdmin(order, requestingUserId, isAdmin);
         OrderStatus previousStatus = order.getStatus();
         order.cancel();
-        order.getItems().size(); // force-initialize the lazy collection before the transaction (and session) closes
         eventPublisher.publishOrderCancelled(order);
         meterRegistry.counter("order.saga.outcomes", "outcome", "cancelled").increment();
         return new OrderCancellationResult(order, previousStatus);

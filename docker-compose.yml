@@ -134,6 +134,12 @@ services:
       DB_URL: jdbc:postgresql://postgres:5432/user_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
+      # No JWT_PRIVATE_KEY here on purpose: user-service generates a throwaway RSA key
+      # pair at startup and logs a warning saying so (ADR 007). That is right for a local
+      # Compose stack -- there is no production key to leak into a committed file -- and
+      # wrong anywhere else, because tokens die with the container and a second replica
+      # would sign with a different key. A real deployment mounts a PKCS#8 PEM.
+      ORDER_SERVICE_CLIENT_SECRET: local-dev-only-order-service-secret
     depends_on:
       postgres:
         condition: service_healthy
@@ -157,6 +163,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      JWT_JWK_SET_URI: http://user-service:8081/.well-known/jwks.json
       DB_URL: jdbc:postgresql://postgres:5432/product_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -187,6 +194,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      JWT_JWK_SET_URI: http://user-service:8081/.well-known/jwks.json
       DB_URL: jdbc:postgresql://postgres:5432/inventory_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -214,12 +222,18 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      JWT_JWK_SET_URI: http://user-service:8081/.well-known/jwks.json
       DB_URL: jdbc:postgresql://postgres:5432/order_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
+      USER_SERVICE_URI: http://user-service:8081
       PRODUCT_SERVICE_URI: http://product-service:8082
       INVENTORY_SERVICE_URI: http://inventory-service:8083
       PAYMENT_SERVICE_URI: http://payment-service:8085
+      # order-service's own credential at user-service's client-credentials endpoint
+      # (ADR 007). Local-Compose-only, like every other credential in this file; it must
+      # match user-service's ORDER_SERVICE_CLIENT_SECRET below.
+      ORDER_SERVICE_CLIENT_SECRET: local-dev-only-order-service-secret
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
     depends_on:
       postgres:
@@ -250,6 +264,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      JWT_JWK_SET_URI: http://user-service:8081/.well-known/jwks.json
       DB_URL: jdbc:postgresql://postgres:5432/payment_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
@@ -277,6 +292,7 @@ services:
     environment:
       SPRING_PROFILES_ACTIVE: docker
       OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
+      JWT_JWK_SET_URI: http://user-service:8081/.well-known/jwks.json
       DB_URL: jdbc:postgresql://postgres:5432/delivery_db
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only

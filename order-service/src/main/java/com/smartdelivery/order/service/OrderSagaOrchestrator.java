@@ -80,7 +80,7 @@ public class OrderSagaOrchestrator {
             return;
         }
 
-        markReservationPending(orderId);
+        eventHandler.markReservationPending(orderId);
 
         List<UUID> reservedProductIds = new ArrayList<>();
         for (OrderLine line : snapshot.items()) {
@@ -97,7 +97,7 @@ public class OrderSagaOrchestrator {
         }
         eventHandler.handleInventoryReserved(orderId);
 
-        markPaymentPending(orderId);
+        eventHandler.markPaymentPending(orderId);
 
         PaymentChargeResult chargeResult = paymentServiceClient.charge(orderId, snapshot.totalAmount());
         if (!chargeResult.successful()) {
@@ -178,7 +178,16 @@ public class OrderSagaOrchestrator {
         }
     }
 
-    @Transactional(readOnly = true)
+    /**
+     * Deliberately not {@code @Transactional}: it is called from {@link #startSaga} on
+     * this same bean, and a proxy-based annotation does nothing on a self-invocation --
+     * writing one here would claim a guarantee that is not there (the state-transition
+     * methods this class used to declare that way silently lost their writes for exactly
+     * that reason; see OrderSagaEventHandler#markReservationPending). It does not need
+     * one: the read runs in the repository's own transaction, and {@code items} is
+     * fetched with the order by OrderRepository's entity graph, so the snapshot below is
+     * complete before the order is detached.
+     */
     OrderSnapshot loadIfResumable(UUID orderId) {
         Order order = orderRepository.findById(orderId).orElse(null);
         if (order == null) {
@@ -196,19 +205,4 @@ public class OrderSagaOrchestrator {
         return new OrderSnapshot(order.getTotalAmount(), lines);
     }
 
-    @Transactional
-    void markReservationPending(UUID orderId) {
-        Order order = orderRepository.findById(orderId).orElseThrow();
-        if (order.getStatus() == OrderStatus.CREATED) {
-            order.transitionTo(OrderStatus.INVENTORY_RESERVATION_PENDING);
-        }
-    }
-
-    @Transactional
-    void markPaymentPending(UUID orderId) {
-        Order order = orderRepository.findById(orderId).orElseThrow();
-        if (order.getStatus() == OrderStatus.INVENTORY_RESERVED) {
-            order.transitionTo(OrderStatus.PAYMENT_PENDING);
-        }
-    }
 }

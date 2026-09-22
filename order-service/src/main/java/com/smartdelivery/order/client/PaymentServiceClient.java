@@ -9,7 +9,6 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
-import com.smartdelivery.order.security.InternalServiceTokenProvider;
 
 import java.math.BigDecimal;
 import java.util.Map;
@@ -35,10 +34,10 @@ public class PaymentServiceClient {
     }
 
     private final RestClient restClient;
-    private final InternalServiceTokenProvider tokenProvider;
+    private final ServiceTokenProvider tokenProvider;
 
     public PaymentServiceClient(
-            RestClient.Builder restClientBuilder, PaymentServiceProperties properties, InternalServiceTokenProvider tokenProvider) {
+            RestClient.Builder restClientBuilder, PaymentServiceProperties properties, ServiceTokenProvider tokenProvider) {
         this.restClient = restClientBuilder.baseUrl(properties.baseUrl()).build();
         this.tokenProvider = tokenProvider;
     }
@@ -77,7 +76,7 @@ public class PaymentServiceClient {
     }
 
     private String bearerToken() {
-        return "Bearer " + tokenProvider.mintServiceToken();
+        return "Bearer " + tokenProvider.currentToken();
     }
 
     /**

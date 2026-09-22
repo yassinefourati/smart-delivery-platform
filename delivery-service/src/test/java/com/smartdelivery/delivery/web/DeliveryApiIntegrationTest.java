@@ -4,8 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdelivery.delivery.event.EventEnvelope;
 import com.smartdelivery.delivery.event.KafkaTopics;
 import com.smartdelivery.delivery.event.PaymentCompletedPayload;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
@@ -16,6 +14,7 @@ import org.apache.kafka.common.serialization.StringDeserializer;
 import org.apache.kafka.common.serialization.StringSerializer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import com.smartdelivery.delivery.security.TestJwtIssuer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -30,12 +29,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
-import javax.crypto.SecretKey;
 import java.math.BigDecimal;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -60,8 +56,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers
 class DeliveryApiIntegrationTest {
 
-    private static final String JWT_SECRET = "integration-test-secret-key-must-be-at-least-32-bytes";
-    private static final SecretKey SIGNING_KEY = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
+    /**
+     * Stands in for user-service: a real JWKS endpoint over HTTP, so these tests
+     * exercise the same key-fetch-and-select path production does (ADR 007).
+     */
+    private static final TestJwtIssuer JWT_ISSUER = new TestJwtIssuer();
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -75,7 +74,9 @@ class DeliveryApiIntegrationTest {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
-        registry.add("jwt.secret", () -> JWT_SECRET);
+        registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", JWT_ISSUER::jwkSetUri);
+        registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TestJwtIssuer.ISSUER);
+        registry.add("spring.security.oauth2.resourceserver.jwt.audiences", () -> TestJwtIssuer.AUDIENCE);
         registry.add("outbox.poll-interval-ms", () -> "500");
     }
 
@@ -134,14 +135,7 @@ class DeliveryApiIntegrationTest {
     }
 
     private String tokenFor(UUID userId, String role) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-                .subject(userId.toString())
-                .claim("roles", List.of(role))
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plusSeconds(3600)))
-                .signWith(SIGNING_KEY)
-                .compact();
+        return JWT_ISSUER.token(userId, role);
     }
 
     private String adminToken() {
@@ -225,5 +219,32 @@ class DeliveryApiIntegrationTest {
                 mockMvc.perform(get("/api/v1/shipments/{id}", shipmentId)
                                 .header("Authorization", "Bearer " + adminToken()))
                         .andExpect(jsonPath("$.status").value("DELIVERED")));
+    }
+
+    // --- Phase 16: this service can verify a token but could never mint one (ADR 007) ---
+
+    /**
+     * The vulnerability Phase 16 closed, asserted from the outside: this token is signed
+     * with the HMAC secret every service used to hold, and it claims ADMIN.
+     */
+    @Test
+    void aTokenSignedWithTheOldSharedHmacSecretIsRejected() throws Exception {
+        mockMvc.perform(get("/api/v1/agents")
+                        .header("Authorization", "Bearer " + JWT_ISSUER.legacyHmacToken(UUID.randomUUID(), "ADMIN")))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void unsignedExpiredForeignAndUnknownKeyTokensAreAllRejected() throws Exception {
+        UUID subject = UUID.randomUUID();
+        for (String token : List.of(
+                JWT_ISSUER.unsignedToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenSignedByAnUnpublishedKey(subject, "ADMIN"),
+                JWT_ISSUER.expiredToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenFromAnotherIssuer(subject, "ADMIN"),
+                JWT_ISSUER.tamperedToken(subject))) {
+            mockMvc.perform(get("/api/v1/agents").header("Authorization", "Bearer " + token))
+                    .andExpect(status().isUnauthorized());
+        }
     }
 }

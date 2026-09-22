@@ -1,6 +1,20 @@
 spring:
   application:
     name: order-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # This service holds no signing key of any kind -- it fetches user-service's
+          # public keys and can only verify (ADR 007, docs/security.md). A token's `kid`
+          # header selects the key, so user-service can rotate without a flag day.
+          jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8081/.well-known/jwks.json}
+          # Validated as claims, not used for OIDC discovery: jwk-set-uri above already
+          # says where the keys are, so nothing here fetches /.well-known/openid-configuration.
+          issuer-uri: ${JWT_ISSUER:https://user-service.smart-delivery.local}
+          # Stops a token minted for some other system that happens to trust the same
+          # issuer from being replayed against this platform.
+          audiences: ${JWT_AUDIENCE:smart-delivery-platform}
   http:
     client:
       # Bounds how long a single call to product-service/inventory-service/payment-service
@@ -76,11 +90,6 @@ info:
     name: order-service
     description: Order lifecycle and Saga orchestration service
 
-# Must match user-service's jwt.secret -- see docs/security.md. Local-dev-only default;
-# every non-local environment MUST override this via the JWT_SECRET env var.
-jwt:
-  secret: ${JWT_SECRET:local-dev-only-secret-key-do-not-use-in-production-min-32-bytes}
-
 services:
   product-service:
     base-url: ${PRODUCT_SERVICE_URI:http://localhost:8082}
@@ -88,6 +97,16 @@ services:
     base-url: ${INVENTORY_SERVICE_URI:http://localhost:8083}
   payment-service:
     base-url: ${PAYMENT_SERVICE_URI:http://localhost:8085}
+  # Where order-service exchanges its own client credentials for the short-lived
+  # SERVICE-role token its saga calls carry (ADR 007). Replaces the pre-Phase-16
+  # arrangement where order-service signed those tokens itself with the platform-wide
+  # HMAC secret. The secret below is a local-dev default and MUST be overridden per
+  # environment; it is order-service's alone, so a leak does not let the holder mint an
+  # ADMIN token or impersonate another service.
+  user-service:
+    base-url: ${USER_SERVICE_URI:http://localhost:8081}
+    client-id: ${ORDER_SERVICE_CLIENT_ID:order-service}
+    client-secret: ${ORDER_SERVICE_CLIENT_SECRET:local-dev-only-order-service-secret}
 
 # The transactional outbox (ADR 004) and its concurrency/retention behavior (ADR 006).
 # Every value here is safe to leave alone; they exist so a deployment that publishes far
@@ -131,15 +150,21 @@ resilience4j:
         permitted-number-of-calls-in-half-open-state: 3
         # A 409 (insufficient stock) is a real business outcome, not a sign
         # inventory-service is unhealthy -- see InventoryServiceClient and
-        # docs/resilience.md. Must not count toward opening the circuit.
+        # docs/resilience.md. Must not count toward opening the circuit. Same reasoning
+        # for ServiceTokenUnavailableException: it is raised inside this breaker (the
+        # SERVICE token is fetched on the way into the call) but means user-service is
+        # unreachable, which says nothing at all about inventory-service -- see ADR 007.
         ignore-exceptions:
           - com.smartdelivery.order.exception.InsufficientStockException
+          - com.smartdelivery.order.exception.ServiceTokenUnavailableException
       payment-service:
         sliding-window-size: 10
         minimum-number-of-calls: 5
         failure-rate-threshold: 50
         wait-duration-in-open-state: 15s
         permitted-number-of-calls-in-half-open-state: 3
+        ignore-exceptions:
+          - com.smartdelivery.order.exception.ServiceTokenUnavailableException
   retry:
     instances:
       product-service:
@@ -154,11 +179,14 @@ resilience4j:
         exponential-backoff-multiplier: 2
         ignore-exceptions:
           - com.smartdelivery.order.exception.InsufficientStockException
+          - com.smartdelivery.order.exception.ServiceTokenUnavailableException
       payment-service:
         max-attempts: 3
         wait-duration: 300ms
         enable-exponential-backoff: true
         exponential-backoff-multiplier: 2
+        ignore-exceptions:
+          - com.smartdelivery.order.exception.ServiceTokenUnavailableException
   bulkhead:
     instances:
       product-service:

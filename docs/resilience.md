@@ -64,6 +64,37 @@ decline isn't an HTTP error there at all (see that class's Javadoc) -- payment-s
 always returns `201` with the outcome in the body, so there's nothing for Resilience4j
 to see either way.
 
+### The same reasoning, one phase later (Phase 16)
+
+`ServiceTokenUnavailableException` is ignored by **both** the `inventory-service` and
+`payment-service` instances, for the identical reason.
+
+Since [ADR 007](adr/007-asymmetric-jwt-signing.md), order-service does not sign its own
+`SERVICE` tokens: it fetches them from user-service. That fetch happens on the way into
+an annotated method — `bearerToken()` is called inside `reserve`, `release`, `deduct`,
+`charge`, and `refund` — so a user-service outage surfaces as a failure *inside* the
+inventory-service and payment-service breakers. It says nothing whatsoever about either
+of those services' health, and letting it count toward their failure rates would let a
+user-service blip open circuits protecting two services that are perfectly fine.
+
+```yaml
+      inventory-service:
+        ignore-exceptions:
+          - com.smartdelivery.order.exception.InsufficientStockException
+          - com.smartdelivery.order.exception.ServiceTokenUnavailableException
+      payment-service:
+        ignore-exceptions:
+          - com.smartdelivery.order.exception.ServiceTokenUnavailableException
+```
+
+This is the only Resilience4j change Phase 16 made; every threshold, window, bulkhead
+size, and rate limit is untouched. It also adds no new Resilience4j instance for the
+token fetch itself — the exception propagates into the same Kafka retry and dead-letter
+path that already handles every other infrastructure failure in a saga step, which is
+this codebase's existing answer and does not need a second one. In practice the fetch is
+rare anyway: `ServiceTokenProvider` caches the token, refreshes it ahead of expiry, and
+falls back to the still-valid cached one if a refresh fails.
+
 ## No fallback methods, on purpose
 
 None of the six annotated methods declare a `fallbackMethod`. This is deliberate, not

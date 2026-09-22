@@ -1,7 +1,6 @@
 package com.smartdelivery.order.client;
 
 import com.smartdelivery.order.exception.InsufficientStockException;
-import com.smartdelivery.order.security.InternalServiceTokenProvider;
 import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import io.github.resilience4j.ratelimiter.annotation.RateLimiter;
@@ -45,10 +44,10 @@ import java.util.UUID;
 public class InventoryServiceClient {
 
     private final RestClient restClient;
-    private final InternalServiceTokenProvider tokenProvider;
+    private final ServiceTokenProvider tokenProvider;
 
     public InventoryServiceClient(
-            RestClient.Builder restClientBuilder, InventoryServiceProperties properties, InternalServiceTokenProvider tokenProvider) {
+            RestClient.Builder restClientBuilder, InventoryServiceProperties properties, ServiceTokenProvider tokenProvider) {
         this.restClient = restClientBuilder.baseUrl(properties.baseUrl()).build();
         this.tokenProvider = tokenProvider;
     }
@@ -104,7 +103,7 @@ public class InventoryServiceClient {
     }
 
     private String bearerToken() {
-        return "Bearer " + tokenProvider.mintServiceToken();
+        return "Bearer " + tokenProvider.currentToken();
     }
 
     /**

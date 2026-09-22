@@ -233,6 +233,40 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       their package declaration -- infrastructure duplication, not the deliberate
       event-contract duplication of [ADR 002](docs/adr/002-kafka-for-events.md), and the
       main argument for the shared platform starter Phase 19 weighs.
+- [x] **Phase 16 — Asymmetric JWT signing**: every service used to verify tokens with the
+      same HMAC secret, which meant every service that could *verify* an ADMIN token could
+      also *forge* one -- one compromised service, however unimportant, was enough to
+      impersonate anyone anywhere. user-service is now the only token issuer, signing
+      RS256 with a private key nothing else has, and publishing the public half at
+      `GET /.well-known/jwks.json` (routed through the gateway; public by design, since a
+      resource server must fetch keys before it can authenticate anything). Every other
+      service became a standard Spring Security OAuth2 resource server -- three properties
+      instead of a hand-written `JwtService` and `JwtAuthenticationFilter`, both now
+      deleted everywhere along with jjwt itself. A `JwtAuthenticationConverter` keeps the
+      `roles` claim mapping to `ROLE_*` and the principal name as the user id, so every
+      existing `@PreAuthorize` ownership check works unchanged, and the existing 401/403
+      handlers are wired into the resource server so error bodies are byte-for-byte what
+      they were: this phase changes how tokens are *trusted*, not who can do what. Tokens
+      carry a `kid` and the JWKS can publish retired keys, so rotation is a configuration
+      change rather than a flag day. order-service's self-minted `SERVICE` tokens
+      (`InternalServiceTokenProvider`) are gone, replaced by a real client-credentials
+      grant against a new `POST /api/v1/auth/service-token`, with a per-service credential
+      and a token cache that refreshes ahead of expiry. See
+      [ADR 007](docs/adr/007-asymmetric-jwt-signing.md).
+
+      Getting a green build for this phase also meant running the Testcontainers suite
+      for the first time in a while, and that turned up **five pre-existing failures**
+      that had been invisible because CI's reactor stopped at the second module. Two were
+      real production bugs, not test bugs: order-service returned `500` on every order
+      read (`LazyInitializationException` on a lazy collection mapped outside its
+      transaction), and the saga never advanced past `CREATED`, because
+      `OrderSagaOrchestrator` invoked its own `@Transactional` methods on itself, which a
+      proxy-based annotation does nothing about -- so no order had ever reached `PAID`.
+      All five are fixed and described in [docs/testing.md](docs/testing.md); none of them
+      were caused by this phase, and each was reproduced on the commit before it. With
+      Docker still unavailable here, Postgres, Redis, and a Kafka broker were installed
+      and run directly in the sandbox instead, and all twelve integration test classes now
+      pass against them.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be
