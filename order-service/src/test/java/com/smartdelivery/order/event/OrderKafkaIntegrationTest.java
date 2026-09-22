@@ -10,12 +10,16 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import com.smartdelivery.order.security.TestJwtIssuer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
+import com.smartdelivery.order.client.UserServiceProperties;
+import com.smartdelivery.order.client.ServiceTokenProvider;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.kafka.core.KafkaTemplate;
@@ -30,17 +34,13 @@ import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.utility.DockerImageName;
 
-import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 
-import static io.jsonwebtoken.security.Keys.hmacShaKeyFor;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -62,8 +62,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import(OrderKafkaIntegrationTest.RestClientTestConfig.class)
 class OrderKafkaIntegrationTest {
 
-    private static final String JWT_SECRET = "integration-test-secret-key-must-be-at-least-32-bytes";
-    private static final SecretKey SIGNING_KEY = hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
+    /**
+     * Stands in for user-service: a real JWKS endpoint over HTTP, so these tests
+     * exercise the same key-fetch-and-select path production does (ADR 007).
+     */
+    private static final TestJwtIssuer JWT_ISSUER = new TestJwtIssuer();
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -77,7 +80,9 @@ class OrderKafkaIntegrationTest {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
-        registry.add("jwt.secret", () -> JWT_SECRET);
+        registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", JWT_ISSUER::jwkSetUri);
+        registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TestJwtIssuer.ISSUER);
+        registry.add("spring.security.oauth2.resourceserver.jwt.audiences", () -> TestJwtIssuer.AUDIENCE);
     }
 
     /**
@@ -99,6 +104,24 @@ class OrderKafkaIntegrationTest {
         @Bean
         MockRestServiceServer mockRestServiceServer(RestClient.Builder builder) {
             return SERVER_HOLDER.get();
+        }
+
+        /**
+         * The real provider would fetch a SERVICE token through this same bound builder,
+         * turning an unrelated call into an unexpected-request failure in every test
+         * here. What that fetch actually does, and what happens without it, is covered by
+         * JwtResourceServerIntegrationTest and user-service's own tests (ADR 007).
+         */
+        @Bean
+        @Primary
+        ServiceTokenProvider testServiceTokenProvider() {
+            return new ServiceTokenProvider(RestClient.builder(),
+                    new UserServiceProperties("http://user-service.invalid", "order-service", "secret")) {
+                @Override
+                public String currentToken() {
+                    return "stub-service-token";
+                }
+            };
         }
     }
 
@@ -154,14 +177,7 @@ class OrderKafkaIntegrationTest {
     }
 
     private String tokenFor(UUID userId, String role) {
-        Instant now = Instant.now();
-        return io.jsonwebtoken.Jwts.builder()
-                .subject(userId.toString())
-                .claim("roles", List.of(role))
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plusSeconds(3600)))
-                .signWith(SIGNING_KEY)
-                .compact();
+        return JWT_ISSUER.token(userId, role);
     }
 
     private void publishRawEvent(String topic, String eventType, Object payload) throws Exception {

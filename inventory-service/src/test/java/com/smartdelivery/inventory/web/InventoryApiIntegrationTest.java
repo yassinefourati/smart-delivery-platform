@@ -7,14 +7,13 @@ import com.smartdelivery.inventory.event.EventEnvelope;
 import com.smartdelivery.inventory.event.KafkaTopics;
 import com.smartdelivery.inventory.repository.InventoryRepository;
 import com.smartdelivery.inventory.repository.WarehouseRepository;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.serialization.StringDeserializer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
+import com.smartdelivery.inventory.security.TestJwtIssuer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
@@ -29,11 +28,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import org.testcontainers.kafka.KafkaContainer;
 import org.testcontainers.utility.DockerImageName;
 
-import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Properties;
@@ -61,8 +56,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Testcontainers
 class InventoryApiIntegrationTest {
 
-    private static final String JWT_SECRET = "integration-test-secret-key-must-be-at-least-32-bytes";
-    private static final SecretKey SIGNING_KEY = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
+    /**
+     * Stands in for user-service: a real JWKS endpoint over HTTP, so these tests
+     * exercise the same key-fetch-and-select path production does (ADR 007).
+     */
+    private static final TestJwtIssuer JWT_ISSUER = new TestJwtIssuer();
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -76,7 +74,9 @@ class InventoryApiIntegrationTest {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
-        registry.add("jwt.secret", () -> JWT_SECRET);
+        registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", JWT_ISSUER::jwkSetUri);
+        registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TestJwtIssuer.ISSUER);
+        registry.add("spring.security.oauth2.resourceserver.jwt.audiences", () -> TestJwtIssuer.AUDIENCE);
     }
 
     @Autowired
@@ -92,14 +92,7 @@ class InventoryApiIntegrationTest {
     private InventoryRepository inventoryRepository;
 
     private String tokenWithRole(String role) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-                .subject(UUID.randomUUID().toString())
-                .claim("roles", List.of(role))
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plusSeconds(3600)))
-                .signWith(SIGNING_KEY)
-                .compact();
+        return JWT_ISSUER.token(UUID.randomUUID(), role);
     }
 
     private String warehouseManagerToken() {
@@ -136,17 +129,24 @@ class InventoryApiIntegrationTest {
         testConsumer.close();
     }
 
-    private ConsumerRecord<String, String> consumeOne(String topic, Duration timeout) {
+    /**
+     * Reads from the start of the topic and returns the event for {@code orderId}
+     * specifically, rather than whatever record happens to be first. Other tests in this
+     * class publish to the same topics, and JUnit does not promise a method order, so
+     * "the first record" is only the right one by luck.
+     */
+    private ConsumerRecord<String, String> consumeOne(String topic, UUID orderId, Duration timeout) {
         testConsumer.subscribe(List.of(topic));
         long deadline = System.currentTimeMillis() + timeout.toMillis();
         while (System.currentTimeMillis() < deadline) {
-            var records = testConsumer.poll(Duration.ofMillis(500));
-            var iterator = records.iterator();
-            if (iterator.hasNext()) {
-                return iterator.next();
+            for (ConsumerRecord<String, String> record : testConsumer.poll(Duration.ofMillis(500))) {
+                if (record.value().contains(orderId.toString())) {
+                    return record;
+                }
             }
         }
-        throw new AssertionError("No message consumed from topic '%s' within %s".formatted(topic, timeout));
+        throw new AssertionError(
+                "No message for order %s consumed from topic '%s' within %s".formatted(orderId, topic, timeout));
     }
 
     @Test
@@ -407,7 +407,7 @@ class InventoryApiIntegrationTest {
 
         reserve(orderId, productId, 3, warehouseManagerToken()).andExpect(status().isCreated());
 
-        var record = consumeOne(KafkaTopics.INVENTORY_RESERVED, Duration.ofSeconds(15));
+        var record = consumeOne(KafkaTopics.INVENTORY_RESERVED, orderId, Duration.ofSeconds(15));
         var envelope = objectMapper.readValue(record.value(), EventEnvelope.class);
         assertThat(envelope.eventType()).isEqualTo("InventoryReserved");
         assertThat(envelope.payload().get("orderId").asText()).isEqualTo(orderId.toString());
@@ -423,9 +423,61 @@ class InventoryApiIntegrationTest {
 
         reserve(orderId, productId, 5, warehouseManagerToken()).andExpect(status().isConflict());
 
-        var record = consumeOne(KafkaTopics.INVENTORY_FAILED, Duration.ofSeconds(15));
+        var record = consumeOne(KafkaTopics.INVENTORY_FAILED, orderId, Duration.ofSeconds(15));
         var envelope = objectMapper.readValue(record.value(), EventEnvelope.class);
         assertThat(envelope.eventType()).isEqualTo("InventoryFailed");
         assertThat(envelope.payload().get("orderId").asText()).isEqualTo(orderId.toString());
+    }
+
+    // --- Phase 16: this service can verify a token but could never mint one (ADR 007) ---
+
+    /**
+     * The vulnerability Phase 16 closed, asserted from the outside: this token is signed
+     * with the HMAC secret every service used to hold, and it claims WAREHOUSE_MANAGER.
+     * Before this phase inventory-service would have accepted it -- and could have
+     * produced it, along with an ADMIN one.
+     */
+    @Test
+    void aTokenSignedWithTheOldSharedHmacSecretIsRejected() throws Exception {
+        mockMvc.perform(get("/api/v1/warehouses")
+                        .header("Authorization", "Bearer " + JWT_ISSUER.legacyHmacToken(UUID.randomUUID(), "WAREHOUSE_MANAGER")))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void unsignedExpiredForeignAndUnknownKeyTokensAreAllRejected() throws Exception {
+        UUID subject = UUID.randomUUID();
+        for (String token : List.of(
+                JWT_ISSUER.unsignedToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenSignedByAnUnpublishedKey(subject, "ADMIN"),
+                JWT_ISSUER.expiredToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenFromAnotherIssuer(subject, "ADMIN"),
+                JWT_ISSUER.tamperedToken(subject))) {
+            mockMvc.perform(get("/api/v1/warehouses").header("Authorization", "Bearer " + token))
+                    .andExpect(status().isUnauthorized());
+        }
+    }
+
+    /**
+     * The saga's own path: order-service reaches reserve/release/deduct with the
+     * client-credentials token user-service issued it, and with nothing else.
+     */
+    @Test
+    void reserveAcceptsAServiceTokenAndRefusesAnUnauthenticatedCall() throws Exception {
+        UUID productId = UUID.randomUUID();
+        persistInventory(persistWarehouse("Service-token depot " + UUID.randomUUID()), productId, 5);
+
+        mockMvc.perform(post("/api/v1/inventory/reserve")
+                        .header("Authorization", "Bearer " + JWT_ISSUER.serviceToken("order-service"))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "orderId", UUID.randomUUID(), "productId", productId, "quantity", 1))))
+                .andExpect(status().isCreated());
+
+        mockMvc.perform(post("/api/v1/inventory/reserve")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(Map.of(
+                                "orderId", UUID.randomUUID(), "productId", productId, "quantity", 1))))
+                .andExpect(status().isUnauthorized());
     }
 }

@@ -1,7 +1,6 @@
 package com.smartdelivery.order.client;
 
 import com.smartdelivery.order.exception.InsufficientStockException;
-import com.smartdelivery.order.security.InternalServiceTokenProvider;
 import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import io.github.resilience4j.springboot3.bulkhead.autoconfigure.BulkheadAutoConfiguration;
 import io.github.resilience4j.springboot3.circuitbreaker.autoconfigure.CircuitBreakerAutoConfiguration;
@@ -23,7 +22,6 @@ import org.springframework.web.client.RestClient;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
 import static org.springframework.test.web.client.response.MockRestResponseCreators.withStatus;
@@ -51,7 +49,6 @@ import static org.springframework.test.web.client.response.MockRestResponseCreat
         RateLimiterAutoConfiguration.class
 })
 @TestPropertySource(properties = {
-        "jwt.secret=integration-test-secret-key-must-be-at-least-32-bytes",
         // Small, fast thresholds so this test needs only a handful of calls, not the
         // application.yml defaults (sliding-window-size: 10) sized for production noise.
         "resilience4j.circuitbreaker.instances.inventory-service.sliding-window-size=4",
@@ -92,15 +89,28 @@ class ResilienceIntegrationTest {
             return new InventoryServiceProperties("http://localhost:8083");
         }
 
+        /**
+         * A stand-in, because this test is about how the circuit breaker reacts to
+         * inventory-service's answers -- not about where the SERVICE token comes from.
+         * The real provider would call user-service over the same RestClient.Builder
+         * MockRestServiceServer is bound to, turning every assertion here into an
+         * argument about an unexpected request. See ADR 007 and, for the real fetch,
+         * JwtResourceServerIntegrationTest.
+         */
         @Bean
-        InternalServiceTokenProvider internalServiceTokenProvider(
-                org.springframework.core.env.Environment env) {
-            return new InternalServiceTokenProvider(env.getRequiredProperty("jwt.secret"));
+        ServiceTokenProvider serviceTokenProvider() {
+            return new ServiceTokenProvider(RestClient.builder(),
+                    new UserServiceProperties("http://user-service.invalid", "order-service", "secret")) {
+                @Override
+                public String currentToken() {
+                    return "stub-service-token";
+                }
+            };
         }
 
         @Bean
         InventoryServiceClient inventoryServiceClient(
-                RestClient.Builder builder, InventoryServiceProperties properties, InternalServiceTokenProvider tokenProvider) {
+                RestClient.Builder builder, InventoryServiceProperties properties, ServiceTokenProvider tokenProvider) {
             return new InventoryServiceClient(builder, properties, tokenProvider);
         }
     }

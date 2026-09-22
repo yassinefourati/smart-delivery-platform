@@ -43,7 +43,7 @@ public class GlobalExceptionHandler {
         return build(HttpStatus.NOT_FOUND, "NOT_FOUND", ex.getMessage(), request);
     }
 
-    @ExceptionHandler({InvalidCredentialsException.class, AuthenticationException.class})
+    @ExceptionHandler({InvalidCredentialsException.class, InvalidServiceClientException.class, AuthenticationException.class})
     public ResponseEntity<ErrorResponse> handleUnauthorized(RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.UNAUTHORIZED, "UNAUTHORIZED", ex.getMessage(), request);
     }

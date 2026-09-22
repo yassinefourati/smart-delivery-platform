@@ -59,6 +59,30 @@ public class OrderSagaEventHandler {
         applyTransition(orderId, OrderStatus.PAYMENT_PENDING, OrderStatus.CANCELLED, "PaymentFailed");
     }
 
+    /**
+     * The saga's own "I am about to reserve" marker, and its payment counterpart below.
+     *
+     * These live here rather than on {@link OrderSagaOrchestrator}, where they used to,
+     * for one specific reason: the orchestrator called them on itself. Spring's
+     * {@code @Transactional} is proxy-based, so a self-invocation goes straight to the
+     * target method and the annotation does nothing -- the order was loaded in the
+     * repository's own transaction, mutated after that transaction had already closed,
+     * and never written back. The order therefore stayed {@code CREATED}, and every
+     * later event ({@code inventory.reserved}, {@code payment.completed}) found it in an
+     * unexpected state and skipped itself as "already handled", so no order ever reached
+     * {@code PAID}. Called across beans, as every other transition here is, the proxy
+     * applies and the write actually happens.
+     */
+    @Transactional
+    public void markReservationPending(UUID orderId) {
+        applyTransition(orderId, OrderStatus.CREATED, OrderStatus.INVENTORY_RESERVATION_PENDING, "SagaStart");
+    }
+
+    @Transactional
+    public void markPaymentPending(UUID orderId) {
+        applyTransition(orderId, OrderStatus.INVENTORY_RESERVED, OrderStatus.PAYMENT_PENDING, "SagaCharge");
+    }
+
     @Transactional
     public void handleShipmentCreated(UUID orderId) {
         applyTransition(orderId, OrderStatus.PAID, OrderStatus.SHIPMENT_CREATED, "ShipmentCreated");

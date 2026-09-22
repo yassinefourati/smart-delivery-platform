@@ -159,9 +159,19 @@ that transaction" part of that same unit of truth, instead of a best-effort afte
 ## Service-to-service authentication
 
 The saga's REST calls (order-service → inventory-service, order-service →
-payment-service) authenticate with a short-lived JWT `InternalServiceTokenProvider`
-mints using the platform's shared HS256 secret — the same secret every service already
-uses to validate user-issued tokens. This is a deliberate, documented stand-in for a
-real service-to-service identity system (e.g. OAuth2 client-credentials against a
-dedicated identity provider): genuinely functional, but it means any service holding
-the shared secret could mint one. See [security.md](security.md).
+payment-service) carry a short-lived `SERVICE`-role token that order-service obtains from
+user-service by presenting its own client id and secret — a real client-credentials grant
+as of Phase 16 ([ADR 007](adr/007-asymmetric-jwt-signing.md)).
+
+Until then, order-service *minted* those tokens itself with the platform-wide HMAC
+secret. That was genuinely functional and genuinely weak: it worked only because every
+service held the same key, which meant every service could have minted one — including an
+ADMIN token. Now order-service holds no signing key, and inventory-service and
+payment-service can verify a `SERVICE` token but could never produce one. See
+[security.md](security.md).
+
+`ServiceTokenProvider` caches the token and refreshes it ahead of expiry, so this adds a
+network call per few minutes rather than per saga step. A fetch that cannot succeed raises
+`ServiceTokenUnavailableException`, which propagates into the same Kafka retry and
+dead-letter path as any other infrastructure failure in a saga step — the saga's
+resumability story is unchanged.

@@ -10,9 +10,12 @@ spring:
             response-timeout: 5s
           routes:
             - id: user-service
+              # /.well-known/jwks.json is routed here too (ADR 007): it is a public
+              # endpoint by design -- a JWKS holds public keys only -- and clients that
+              # reach the platform only through the gateway need a way to see it.
               uri: ${USER_SERVICE_URI:http://localhost:8081}
               predicates:
-                - Path=/api/v1/users/**,/api/v1/auth/**
+                - Path=/api/v1/users/**,/api/v1/auth/**,/.well-known/jwks.json
             - id: product-service
               uri: ${PRODUCT_SERVICE_URI:http://localhost:8082}
               predicates:

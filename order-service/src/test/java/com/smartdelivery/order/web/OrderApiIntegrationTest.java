@@ -1,15 +1,17 @@
 package com.smartdelivery.order.web;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
 import org.junit.jupiter.api.BeforeEach;
+import com.smartdelivery.order.security.TestJwtIssuer;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Primary;
+import com.smartdelivery.order.client.UserServiceProperties;
+import com.smartdelivery.order.client.ServiceTokenProvider;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.test.context.DynamicPropertyRegistry;
@@ -21,10 +23,6 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
-import javax.crypto.SecretKey;
-import java.nio.charset.StandardCharsets;
-import java.time.Instant;
-import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -52,8 +50,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 @Import(OrderApiIntegrationTest.RestClientTestConfig.class)
 class OrderApiIntegrationTest {
 
-    private static final String JWT_SECRET = "integration-test-secret-key-must-be-at-least-32-bytes";
-    private static final SecretKey SIGNING_KEY = Keys.hmacShaKeyFor(JWT_SECRET.getBytes(StandardCharsets.UTF_8));
+    /**
+     * Stands in for user-service: a real JWKS endpoint over HTTP, so these tests
+     * exercise the same key-fetch-and-select path production does (ADR 007).
+     */
+    private static final TestJwtIssuer JWT_ISSUER = new TestJwtIssuer();
 
     @Container
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
@@ -63,7 +64,9 @@ class OrderApiIntegrationTest {
         registry.add("spring.datasource.url", postgres::getJdbcUrl);
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
-        registry.add("jwt.secret", () -> JWT_SECRET);
+        registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", JWT_ISSUER::jwkSetUri);
+        registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TestJwtIssuer.ISSUER);
+        registry.add("spring.security.oauth2.resourceserver.jwt.audiences", () -> TestJwtIssuer.AUDIENCE);
     }
 
     /**
@@ -92,6 +95,24 @@ class OrderApiIntegrationTest {
             // testRestClientBuilder(), so SERVER_HOLDER is guaranteed populated.
             return SERVER_HOLDER.get();
         }
+
+        /**
+         * The real provider would fetch a SERVICE token through this same bound builder,
+         * turning an unrelated call into an unexpected-request failure in every test
+         * here. What that fetch actually does, and what happens without it, is covered by
+         * JwtResourceServerIntegrationTest and user-service's own tests (ADR 007).
+         */
+        @Bean
+        @Primary
+        ServiceTokenProvider testServiceTokenProvider() {
+            return new ServiceTokenProvider(RestClient.builder(),
+                    new UserServiceProperties("http://user-service.invalid", "order-service", "secret")) {
+                @Override
+                public String currentToken() {
+                    return "stub-service-token";
+                }
+            };
+        }
     }
 
     @Autowired
@@ -109,14 +130,7 @@ class OrderApiIntegrationTest {
     }
 
     private String tokenFor(UUID userId, String role) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-                .subject(userId.toString())
-                .claim("roles", List.of(role))
-                .issuedAt(Date.from(now))
-                .expiration(Date.from(now.plusSeconds(3600)))
-                .signWith(SIGNING_KEY)
-                .compact();
+        return JWT_ISSUER.token(userId, role);
     }
 
     private void stubProduct(UUID productId, String name, String price, boolean active) throws Exception {
@@ -337,5 +351,36 @@ class OrderApiIntegrationTest {
         mockMvc.perform(post("/api/v1/orders/{id}/cancel", orderId)
                         .header("Authorization", "Bearer " + token))
                 .andExpect(status().isConflict());
+    }
+
+    // --- Phase 16: this service can verify a token but could never mint one (ADR 007) ---
+
+    /**
+     * The vulnerability Phase 16 closed, asserted from the outside: this token is signed
+     * with the HMAC secret every service used to hold, and it claims ADMIN -- which on
+     * this service reads any customer's orders. order-service is also the service that
+     * used to sign its own tokens with that secret, so it is the most pointed place to
+     * assert this.
+     */
+    @Test
+    void aTokenSignedWithTheOldSharedHmacSecretIsRejected() throws Exception {
+        mockMvc.perform(get("/api/v1/orders/{id}", UUID.randomUUID())
+                        .header("Authorization", "Bearer " + JWT_ISSUER.legacyHmacToken(UUID.randomUUID(), "ADMIN")))
+                .andExpect(status().isUnauthorized());
+    }
+
+    @Test
+    void unsignedExpiredForeignAndUnknownKeyTokensAreAllRejected() throws Exception {
+        UUID subject = UUID.randomUUID();
+        for (String token : List.of(
+                JWT_ISSUER.unsignedToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenSignedByAnUnpublishedKey(subject, "ADMIN"),
+                JWT_ISSUER.expiredToken(subject, "ADMIN"),
+                JWT_ISSUER.tokenFromAnotherIssuer(subject, "ADMIN"),
+                JWT_ISSUER.tamperedToken(subject))) {
+            mockMvc.perform(get("/api/v1/orders/{id}", UUID.randomUUID())
+                            .header("Authorization", "Bearer " + token))
+                    .andExpect(status().isUnauthorized());
+        }
     }
 }

@@ -1,6 +1,20 @@
 spring:
   application:
     name: delivery-service
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # This service holds no signing key of any kind -- it fetches user-service's
+          # public keys and can only verify (ADR 007, docs/security.md). A token's `kid`
+          # header selects the key, so user-service can rotate without a flag day.
+          jwk-set-uri: ${JWT_JWK_SET_URI:http://localhost:8081/.well-known/jwks.json}
+          # Validated as claims, not used for OIDC discovery: jwk-set-uri above already
+          # says where the keys are, so nothing here fetches /.well-known/openid-configuration.
+          issuer-uri: ${JWT_ISSUER:https://user-service.smart-delivery.local}
+          # Stops a token minted for some other system that happens to trust the same
+          # issuer from being replayed against this platform.
+          audiences: ${JWT_AUDIENCE:smart-delivery-platform}
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/delivery_db}
     username: ${DB_USERNAME:sdp}
@@ -62,11 +76,6 @@ info:
   app:
     name: delivery-service
     description: Shipment and delivery agent management service
-
-# Must match user-service's jwt.secret -- see docs/security.md. Local-dev-only default;
-# every non-local environment MUST override this via the JWT_SECRET env var.
-jwt:
-  secret: ${JWT_SECRET:local-dev-only-secret-key-do-not-use-in-production-min-32-bytes}
 
 # The transactional outbox (ADR 004) and its concurrency/retention behavior (ADR 006).
 # Every value here is safe to leave alone; they exist so a deployment that publishes far

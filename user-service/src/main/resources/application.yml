@@ -49,11 +49,40 @@ info:
     name: user-service
     description: User, authentication, roles and address management service
 
-# Local-development-only default. Every non-local environment MUST override this via
-# the JWT_SECRET env var with a strong, environment-specific secret -- see docs/security.md.
+# user-service is the only service in the platform that holds a signing key; everyone
+# else fetches the public half from /.well-known/jwks.json -- see ADR 007 and
+# docs/security.md.
 jwt:
-  secret: ${JWT_SECRET:local-dev-only-secret-key-do-not-use-in-production-min-32-bytes}
-  expiration-ms: ${JWT_EXPIRATION_MS:3600000}
+  # Validated by every resource server as the `iss` and `aud` claims. Identifiers, not
+  # URLs that have to resolve -- the JWKS location is configured separately, per service.
+  issuer: ${JWT_ISSUER:https://user-service.smart-delivery.local}
+  audience: ${JWT_AUDIENCE:smart-delivery-platform}
+  expiration: ${JWT_EXPIRATION:1h}
+  # Service tokens are fetched on demand by a process that can always fetch another, so
+  # there is no reason to hand out a long-lived one.
+  service-expiration: ${JWT_SERVICE_EXPIRATION:5m}
+  signing-key:
+    # Stamped into every token's `kid` header so a resource server can pick the right
+    # JWKS entry -- and so this key can be rotated without invalidating tokens signed by
+    # its predecessor. See jwt.retired-keys below.
+    kid: ${JWT_SIGNING_KID:sdp-dev-key-1}
+    # A PKCS#8 PEM, from an env var or a mounted file. LEFT EMPTY ON PURPOSE for local
+    # development: JwtKeyProvider then generates a throwaway RSA key pair at startup and
+    # logs a warning saying so. That is fine on one laptop and wrong everywhere else --
+    # tokens die with the process, and two replicas would sign with different keys. Set
+    # JWT_PRIVATE_KEY in any real environment.
+    private-key: ${JWT_PRIVATE_KEY:}
+    # Optional: derived from the private key when omitted, which is the normal case.
+    public-key: ${JWT_PUBLIC_KEY:}
+  # Public keys of previously-active signing keys, still published in the JWKS so tokens
+  # they signed keep verifying. Rotation is: add the new key as signing-key, move the old
+  # one here, and drop it once nothing signed by it can still be unexpired.
+  retired-keys: []
+  # One credential per calling service for POST /api/v1/auth/service-token, so a leak is
+  # scoped to that service rather than to the whole platform. Local-dev defaults; every
+  # non-local environment MUST override them.
+  service-clients:
+    order-service: ${ORDER_SERVICE_CLIENT_SECRET:local-dev-only-order-service-secret}
 
 springdoc:
   swagger-ui:
