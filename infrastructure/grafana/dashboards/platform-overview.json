@@ -2,7 +2,7 @@
   "title": "Smart Delivery Platform - Overview",
   "uid": "sdp-platform-overview",
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "editable": true,
   "timezone": "browser",
   "time": { "from": "now-1h", "to": "now" },
@@ -130,6 +130,86 @@
         }
       ],
       "description": "Only meaningful for the 6 services with a database (user, product, inventory, order, payment, delivery) -- api-gateway and notification-service have no pool and report no series here."
+    },
+    {
+      "id": 9,
+      "title": "Outbox backlog per service",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job) (outbox_pending_count)",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "description": "Rows committed but not yet on Kafka, per service (ADR 006). A small, constantly-changing number is the healthy steady state -- rows land and drain within one poll interval. A number that only climbs means publishing is stuck, which from downstream is indistinguishable from a stalled saga."
+    },
+    {
+      "id": 10,
+      "title": "Oldest unpublished outbox event",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 32 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max by (job) (outbox_oldest_pending_age_seconds)",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "description": "Age of the oldest PENDING row (ADR 006). This is the alertable outbox signal: it should sit near the 2s poll interval. Anything sustained above a few seconds means events are committed but not reaching consumers."
+    },
+    {
+      "id": 11,
+      "title": "Outbox publish rate by event type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job, eventType) (rate(outbox_published_total[5m]))",
+          "legendFormat": "{{job}} {{eventType}}"
+        }
+      ],
+      "description": "Events actually handed to Kafka by OutboxPublisher, tagged by event type."
+    },
+    {
+      "id": 12,
+      "title": "Outbox publish failures by event type",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 40 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job, eventType) (rate(outbox_publish_failures_total[5m]))",
+          "legendFormat": "{{job}} {{eventType}}"
+        }
+      ],
+      "description": "Failed sends (ADR 006). A failure deliberately holds back the rest of that aggregate's events, so failures confined to one event type mean a stalled stream for those aggregates, not merely a retry. Retries back off exponentially, so this rate falls away even while the backlog panel above does not."
+    },
+    {
+      "id": 13,
+      "title": "Outbox rows reclaimed by cleanup",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "sum by (job) (rate(outbox_cleanup_deleted_total[1h]))",
+          "legendFormat": "{{job}}"
+        }
+      ],
+      "description": "Published rows deleted past outbox.retention (default 7d). Flat at zero on a deployment younger than the retention window; a table that still reclaims nothing after that is a cleanup job that is not running."
     }
   ]
 }

@@ -114,10 +114,23 @@ handle:
   Any consumer rendering one of these for a human should format it explicitly (`%.2f`,
   not a bare `%s` on the `BigDecimal`) rather than assume the string form survived
   intact -- see `NotificationEventListener`'s Javadoc.
-- **Ordering**: ordering is only guaranteed within a partition. Events are partitioned
-  by `orderId` (or the relevant aggregate ID) so that all events for one order are
-  strictly ordered relative to each other, while different orders can be processed in
-  parallel across partitions.
+- **Ordering: per aggregate, at least once.** All events for one aggregate (an order, a
+  reservation, a payment, a shipment) are delivered in the order the producing service
+  recorded them; events for different aggregates may interleave freely. Two mechanisms
+  together give this, and both are needed:
+  - Events are partitioned by the aggregate ID, so Kafka preserves whatever order the
+    producer *sent* in -- ordering is only ever guaranteed within a partition.
+  - The outbox poller only ever claims the **oldest unpublished event per aggregate**
+    (`OutboxPublisher`, [ADR 006](adr/006-outbox-concurrency-and-ordering.md)), so the
+    order it sends in is the order the events were recorded in -- across any number of
+    service instances, and whether or not an earlier event is currently failing, backing
+    off, or held by a peer instance.
+
+  Before Phase 15 only the first of those was true, so a failed send for an aggregate's
+  first event did not stop its second from being published ahead of it, and two replicas
+  could each claim a different event of the same aggregate. A consumer could therefore
+  see one order's events out of order; it no longer can. What has *not* changed: ordering
+  says nothing about duplicates, and every consumer must still be idempotent.
 - **Retry and dead-letter**: a listener that throws is retried 3 times, 1 second apart
   (Spring Kafka's `DefaultErrorHandler` with a `FixedBackOff`); once exhausted, the
   message is published to a `<topic>.DLT` dead-letter topic (`DeadLetterPublishingRecoverer`)
@@ -155,11 +168,27 @@ own `outbox_events` table (`OutboxEvent`/`OutboxStatus`/`OutboxEventRepository`)
   `PaymentService.charge`), so the row and the change either both commit or neither
   does.
 - A separate `OutboxPublisher` (`@Scheduled`, default every 2s --
-  `outbox.poll-interval-ms`) polls `PENDING` rows oldest-first, sends each to Kafka, and
-  marks it `PUBLISHED` on success. A failed send is left `PENDING` (with `attempts`/
-  `lastError` updated) for the next poll to retry -- indefinitely, since "publish an
-  already-published row again" is the only failure mode this needs to tolerate, and
-  every consumer here already handles duplicates (see above).
+  `outbox.poll-interval-ms`) *claims* a batch of `PENDING` rows inside a transaction and
+  sends each to Kafka, marking it `PUBLISHED` on success. The claim is
+  `... FOR UPDATE SKIP LOCKED` over the oldest unpublished row per aggregate, which is
+  both what makes the poller safe to run on several instances at once and what gives the
+  per-aggregate ordering guarantee above -- see
+  [ADR 006](adr/006-outbox-concurrency-and-ordering.md) for the query and why each clause
+  is there. A failed send is left `PENDING` (with `attempts`/`lastError` updated, and
+  `nextAttemptAt` pushed out exponentially) for a later poll to retry -- indefinitely,
+  since "publish an already-published row again" is the only failure mode this needs to
+  tolerate, and every consumer here already handles duplicates (see above). It also holds
+  back the rest of *that aggregate's* events until it succeeds; other aggregates are
+  unaffected.
+- An `OutboxCleanupJob` (`@Scheduled`, default hourly) deletes `PUBLISHED` rows older
+  than `outbox.retention` (default 7d), in bounded batches and safely from several
+  instances at once. `PENDING` rows are never deleted at any age -- an old `PENDING` row
+  means a *stuck* event, and deleting it would turn a visible backlog into the silent
+  loss the outbox exists to prevent.
+- Four metrics per service make all of this observable: the gauges
+  `outbox.pending.count` and `outbox.oldest.pending.age.seconds`, and the counters
+  `outbox.published` and `outbox.publish.failures`, tagged by event type. See
+  [observability.md](observability.md).
 - This closes the gap the pre-Phase-8 design had: a crash between the DB commit and the
   Kafka publish used to lose the event silently. Now the event is durably recorded in
   the same transaction as the fact it describes, and only *when* it reaches Kafka is

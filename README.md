@@ -210,6 +210,29 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       [docs/ci-cd.md](docs/ci-cd.md) for that scoping decision, made the same way
       Phase 12's Kafka-lag panel and Phase 1's static analysis were deferred rather than
       built against nothing real.
+- [x] **Phase 15 — Outbox hardening**: the Phase 8 poller was only correct with exactly
+      one instance of a service running, which nothing enforced. Three fixes, identical in
+      all four publishing services (order, inventory, payment, delivery) -- see
+      [ADR 006](docs/adr/006-outbox-concurrency-and-ordering.md). (1) `OutboxPublisher`
+      now *claims* its batch with a locking query inside a transaction
+      (`FOR UPDATE SKIP LOCKED`) instead of reading rows anybody else could read too, so
+      two replicas can no longer publish the same row. (2) That claim is restricted to the
+      **oldest unpublished event per aggregate**, ordered by a new database-assigned
+      `sequence_no` rather than by `created_at` (which ties between rows written in one
+      transaction). This makes per-aggregate ordering a guarantee rather than an accident:
+      previously a failed send for an order's first event didn't stop its second from
+      going out ahead of it, and two replicas could each grab a different event of the
+      same order. (3) An `OutboxCleanupJob` reclaims `PUBLISHED` rows past
+      `outbox.retention` (default 7d) in bounded, concurrency-safe batches -- nothing had
+      ever deleted one, so every event every service had published was still in its
+      database. Failed rows also back off exponentially now (`next_attempt_at`) instead of
+      being retried every two seconds forever; retries stay *unbounded*, since abandoning
+      a row would silently drop an event whose business change is already committed. Five
+      new metrics per service and five new Grafana panels make a stuck outbox visible for
+      the first time. The four implementations are byte-for-byte identical apart from
+      their package declaration -- infrastructure duplication, not the deliberate
+      event-contract duplication of [ADR 002](docs/adr/002-kafka-for-events.md), and the
+      main argument for the shared platform starter Phase 19 weighs.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

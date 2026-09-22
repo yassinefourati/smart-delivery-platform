@@ -62,9 +62,25 @@ info:
 jwt:
   secret: ${JWT_SECRET:local-dev-only-secret-key-do-not-use-in-production-min-32-bytes}
 
-# How often OutboxPublisher polls outbox_events for PENDING rows -- see ADR 004.
+# The transactional outbox (ADR 004) and its concurrency/retention behavior (ADR 006).
+# Every value here is safe to leave alone; they exist so a deployment that publishes far
+# more, or far fewer, events than this one can tune without a code change.
 outbox:
+  # How often OutboxPublisher claims a batch of PENDING rows.
   poll-interval-ms: ${OUTBOX_POLL_INTERVAL_MS:2000}
+  # Rows claimed per poll. Each is sent inside the claiming transaction, so this also
+  # bounds how long that transaction holds its row locks -- see OutboxPublisher.
+  batch-size: ${OUTBOX_BATCH_SIZE:50}
+  # Backoff for a row that fails to publish. Retries stay unbounded (ADR 004); these
+  # only stop a poison row from being retried every poll interval forever.
+  initial-backoff: ${OUTBOX_INITIAL_BACKOFF:2s}
+  max-backoff: ${OUTBOX_MAX_BACKOFF:5m}
+  # How long a PUBLISHED row is kept before OutboxCleanupJob deletes it, and how that
+  # deletion is paced. PENDING rows are never deleted, whatever their age.
+  retention: ${OUTBOX_RETENTION:7d}
+  cleanup-interval-ms: ${OUTBOX_CLEANUP_INTERVAL_MS:3600000}
+  cleanup-batch-size: ${OUTBOX_CLEANUP_BATCH_SIZE:500}
+  cleanup-max-batches-per-run: ${OUTBOX_CLEANUP_MAX_BATCHES_PER_RUN:20}
 
 springdoc:
   swagger-ui:

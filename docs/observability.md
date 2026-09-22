@@ -73,6 +73,32 @@ user-initiated cancellation. It backs the "order processing failure rate" dashbo
 panel — the one genuinely business-specific panel, since a healthy JVM with a broken
 saga is the failure mode that matters most here.
 
+**Outbox metrics (Phase 15).** Four meters per publishing service (order, inventory,
+payment, delivery — `OutboxMetrics`, see
+[ADR 006](adr/006-outbox-concurrency-and-ordering.md)):
+
+| Metric | Type | Tags | What it says |
+|---|---|---|---|
+| `outbox.pending.count` | gauge | — | Rows committed but not yet on Kafka. |
+| `outbox.oldest.pending.age.seconds` | gauge | — | Age of the oldest unpublished row; 0 when there are none. |
+| `outbox.published` | counter | `eventType` | Events actually handed to the broker. |
+| `outbox.publish.failures` | counter | `eventType` | Sends that failed and will be retried after a backoff. |
+| `outbox.cleanup.deleted` | counter | — | Published rows reclaimed past `outbox.retention`. |
+
+The counters say what the poller did; the **gauges** are the ones worth alerting on, and
+they are the reason this instrumentation exists. A non-zero pending count is the normal
+steady state — rows land continuously and drain within a poll interval — so the signal
+is a count that only climbs, or an oldest-pending age well past the 2s poll interval.
+Either means events are committed but not reaching consumers, which from downstream is
+indistinguishable from a stalled saga. Before Phase 15 nothing in this platform
+distinguished "publishing normally" from "publishing nothing at all".
+
+`outbox.publish.failures` is tagged by event type rather than merely counted because a
+failure confined to one topic (a broker-side rejection of one payload shape) is a very
+different problem from the whole broker being unreachable — and because a failure holds
+back the rest of *that aggregate's* events by design, so a sustained non-zero rate on one
+event type means a stalled stream for those aggregates, not just a retry.
+
 ## Dashboards → Grafana (Phase 12)
 
 A `grafana` service in `docker-compose.yml` (reachable at `localhost:3000`, anonymous
@@ -86,7 +112,9 @@ from `infrastructure/grafana/provisioning`:
   and p95 latency per service; order processing outcomes and failure rate; JVM heap used
   and GC pause time per service; HikariCP connection pool saturation (the 6 services with
   a database — api-gateway and notification-service have no pool and report no series on
-  that panel).
+  that panel); and, added in Phase 15, five outbox panels — backlog and oldest
+  unpublished event per service, publish and failure rates by event type, and rows
+  reclaimed by the cleanup job.
 
 **Scoped out.** A Kafka consumer lag panel is not included. It would need a
 `kafka-exporter` (or Prometheus's own experimental Kafka support) added as another
@@ -104,7 +132,13 @@ a running stack. Metric names used in the dashboard (`http_server_requests_secon
 `jvm_memory_used_bytes`, `jvm_gc_pause_seconds_sum`, `hikaricp_connections_*`) are
 Micrometer/Spring Boot's standard, documented metric names, not custom instrumentation,
 so this is a low-risk gap — but it is a real one, and running `docker compose up` to
-confirm dashboards actually render is worth doing before relying on this in anger.
+confirm dashboards actually render is worth doing before relying on this in anger. The
+Phase 15 outbox panels carry the same caveat, with one extra wrinkle worth knowing: the
+`outbox_*` series are this codebase's own instrumentation rather than Spring Boot's, so
+their Prometheus names follow Micrometer's dot-to-underscore convention plus the `_total`
+suffix a counter gets (`outbox.published` → `outbox_published_total`). That naming is
+mechanical and documented, but unlike the standard series it has not been read back off a
+live `/actuator/prometheus`.
 
 ## Distributed tracing → OpenTelemetry (Phase 12)
 

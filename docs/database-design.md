@@ -60,6 +60,23 @@ delivery-service from the start, Phase 9) — a business-data write and the outb
 announcing it commit in the same local transaction. See [ADR 004](adr/004-outbox-pattern.md)
 and [kafka-events.md](kafka-events.md#the-outbox-in-practice) for the full design.
 
+Phase 15 added three columns and rebuilt the indexes on all four of those tables
+([ADR 006](adr/006-outbox-concurrency-and-ordering.md)):
+
+| Column | Why |
+|---|---|
+| `sequence_no BIGINT NOT NULL` | Database-assigned publish order. Replaces `created_at` as the poller's ordering key, because rows written in one transaction share a `created_at` and a tie makes "the oldest unpublished event for this aggregate" ambiguous. |
+| `next_attempt_at TIMESTAMPTZ NOT NULL` | Earliest time the poller may retry a failed row, pushed out exponentially per attempt. |
+
+The index on `(created_at) WHERE status = 'PENDING'` became one on
+`(sequence_no) WHERE status = 'PENDING'`, joined by
+`(aggregate_id, sequence_no) WHERE status = 'PENDING'` for the claim query's
+oldest-per-aggregate check and by `(status, published_at)` for the retention job — the
+one query here that deliberately targets the `PUBLISHED` majority rather than avoiding
+it. Existing rows are backfilled in `created_at` order rather than left to a table
+rewrite's arbitrary order, so an in-flight `PENDING` backlog is not reordered by the
+migration itself.
+
 ## Migration ownership
 
 A service's Flyway migrations are that service's alone to write and run — no
