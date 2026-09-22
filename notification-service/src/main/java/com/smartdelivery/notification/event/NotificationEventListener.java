@@ -59,6 +59,20 @@ public class NotificationEventListener {
                 "Order %s cancelled for user %s (%s)".formatted(payload.orderId(), payload.userId(), payload.reason())));
     }
 
+    /**
+     * An order the platform gave up on, as opposed to one the customer cancelled -- see
+     * ADR 008. Worth a distinct message: "we could not complete your order" is a
+     * different thing for a customer to read than "your cancellation went through".
+     */
+    @KafkaListener(topics = KafkaTopics.ORDER_FAILED)
+    public void onOrderFailed(String message) throws JsonProcessingException {
+        EventEnvelope envelope = parseEnvelope(message);
+        var payload = parsePayload(envelope, OrderFailedPayload.class);
+        withCorrelation(envelope, () -> sender.send(
+                "Order %s could not be completed for user %s and has been cancelled (%s)"
+                        .formatted(payload.orderId(), payload.userId(), payload.reason())));
+    }
+
     @KafkaListener(topics = KafkaTopics.INVENTORY_RESERVED)
     public void onInventoryReserved(String message) throws JsonProcessingException {
         EventEnvelope envelope = parseEnvelope(message);

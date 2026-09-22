@@ -2,6 +2,7 @@ package com.smartdelivery.notification.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdelivery.notification.notify.NotificationSender;
+import org.springframework.http.converter.json.Jackson2ObjectMapperBuilder;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
@@ -26,7 +27,12 @@ class NotificationEventListenerTest {
     @Captor
     private ArgumentCaptor<String> messageCaptor;
 
-    private final ObjectMapper objectMapper = new ObjectMapper().findAndRegisterModules();
+    /**
+     * Built the way Spring Boot builds the one this listener is injected with -- notably
+     * with FAIL_ON_UNKNOWN_PROPERTIES off, which is what lets a producer add a field
+     * without breaking this service (ADR 002's tolerant-reader rule, exercised below).
+     */
+    private final ObjectMapper objectMapper = Jackson2ObjectMapperBuilder.json().build();
 
     private NotificationEventListener listener() {
         return new NotificationEventListener(objectMapper, sender);
@@ -155,5 +161,38 @@ class NotificationEventListenerTest {
 
         verify(sender).send(messageCaptor.capture());
         assertThat(messageCaptor.getValue()).contains(orderId.toString(), shipmentId.toString());
+    }
+
+    /**
+     * order-service added {@code previousStatus} to this payload in Phase 17 (ADR 008).
+     * notification-service does not know the field exists and must not care -- this is
+     * the concrete case behind "any payload change must be backward compatible".
+     */
+    @Test
+    void onOrderCancelledIgnoresFieldsTheProducerAddedLater() throws Exception {
+        UUID orderId = UUID.randomUUID();
+        var payload = objectMapper.createObjectNode()
+                .put("orderId", orderId.toString())
+                .put("userId", UUID.randomUUID().toString())
+                .put("reason", "Cancelled by customer")
+                .put("previousStatus", "PAID");
+
+        listener().onOrderCancelled(envelopeJson("OrderCancelled", payload));
+
+        verify(sender).send(messageCaptor.capture());
+        assertThat(messageCaptor.getValue()).contains(orderId.toString(), "Cancelled by customer");
+    }
+
+    @Test
+    void onOrderFailedRendersItDifferentlyFromACustomerCancellation() throws Exception {
+        UUID orderId = UUID.randomUUID();
+        var payload = new OrderFailedPayload(orderId, UUID.randomUUID(),
+                "Saga exhausted its retries without completing", "INVENTORY_RESERVED");
+
+        listener().onOrderFailed(envelopeJson("OrderFailed", payload));
+
+        verify(sender).send(messageCaptor.capture());
+        assertThat(messageCaptor.getValue())
+                .contains(orderId.toString(), "could not be completed", "Saga exhausted its retries");
     }
 }

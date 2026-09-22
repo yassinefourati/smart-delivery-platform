@@ -27,20 +27,59 @@ stateDiagram-v2
     INVENTORY_RESERVED --> CANCELLED: customer cancels (inventory released)
     PAYMENT_PENDING --> CANCELLED: customer cancels
     PAID --> CANCELLED: customer cancels (refund required)
+    CREATED --> FAILED: reaper gives up
+    INVENTORY_RESERVED --> FAILED: reaper gives up
+    PAYMENT_PENDING --> FAILED: reaper gives up
     CANCELLED --> [*]
     FAILED --> [*]
 ```
 
+### The reaper's path (Phase 17)
+
+The four states on the left below are the ones a saga can stall in. Nothing used to
+notice: an order that has stopped progressing looks exactly like one progressing slowly.
+`StuckSagaReaper` ([ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)) is
+what notices.
+
+```mermaid
+stateDiagram-v2
+    state "CREATED / INVENTORY_RESERVATION_PENDING /\nINVENTORY_RESERVED / PAYMENT_PENDING" as STUCK
+    [*] --> STUCK: saga step exhausted its Kafka retries
+    STUCK --> CLAIMED: untouched for > saga.stuck-threshold\n(FOR UPDATE SKIP LOCKED; saga_attempts++)
+    CLAIMED --> RESTARTED: saga_attempts < saga.max-attempts
+    RESTARTED --> STUCK: still stuck a threshold later
+    RESTARTED --> PAID: saga resumes and completes
+    CLAIMED --> ABANDONED: attempts exhausted
+    ABANDONED --> FAILED: release reservations, refund if charged,\nthen publish order.failed
+    PAID --> [*]
+    FAILED --> [*]
+```
+
+Incrementing `saga_attempts` refreshes `updated_at`, which takes the order out of the
+eligible set for another `stuck-threshold`. That is what makes the claim a *lease*: a
+second reaper instance polling at the same moment is skipped by `SKIP LOCKED`, and by its
+next poll the order is no longer stuck.
+
 Cancellation is only allowed while the order has not yet shipped
 (`CREATED` … `PAID`, before `SHIPMENT_CREATED`) — once a shipment exists, cancellation
-must go through the delivery workflow instead of a simple status flip. Today
-(Phase 5), `POST /api/v1/orders/{id}/cancel` only flips the order's own status; it does
-not yet publish the event that would tell inventory-service to release a reservation or
-payment-service to refund a charge for an order that had already progressed past
-`CREATED` -- that compensation wiring is part of the saga (Phase 7, see
-[saga.md](saga.md)). In practice this doesn't understate today's behavior: nothing yet
-drives an order past `CREATED`, so every order that can be cancelled right now has
-nothing to compensate.
+must go through the delivery workflow instead of a simple status flip.
+
+`POST /api/v1/orders/{id}/cancel` flips the order's status and, in the *same transaction*,
+writes an `order.cancelled` outbox row carrying the status the order held immediately
+before. order-service then consumes that event itself and compensates off it — releasing a
+reservation, or refunding a payment, depending on that previous status.
+
+Compensation used to run inline in the cancel request, after that transaction had already
+committed. A failed refund, or a pod dying in the window, left the order CANCELLED with
+its stock still held and its payment still taken, and nothing anywhere would ever try
+again. Moving it onto the event makes "the order was cancelled" and "something will
+compensate for it" one atomic fact, and gives compensation the retry and dead-letter
+handling every other consumer here already has. See
+[ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md).
+
+`FAILED` is reachable from every state a saga can stall in, not just from
+`INVENTORY_RESERVATION_PENDING`. An abandoned saga has to be able to end somewhere;
+before Phase 17 an order stalled in `INVENTORY_RESERVED` had no terminal state at all.
 
 ## Happy path
 

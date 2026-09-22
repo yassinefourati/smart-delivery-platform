@@ -24,7 +24,7 @@ phase's job was to audit that coverage for gaps and close the one real one: api-
 | user-service | `AuthServiceTest`, `UserServiceTest`, `JwtServiceTest` (RS256 signing, `kid`, claims, round-tripped through a real `JwtDecoder`), `JwtKeyProviderTest` (key loading, rotation, no private material in the JWKS), `ServiceTokenServiceTest` | `UserApiIntegrationTest` (Postgres — now also the JWKS endpoint, the client-credentials grant, and an old-HMAC token being rejected) |
 | product-service | `ProductServiceTest`, `CategoryServiceTest` | `ProductApiIntegrationTest` (Postgres) |
 | inventory-service | reservation/warehouse/admin service tests, `InventoryTest` (domain) | `InventoryApiIntegrationTest` (Postgres) — includes a genuine concurrency test: two reservation requests for the last unit of stock fired from separate threads at a `CyclicBarrier`, asserting exactly one wins and the other sees a real conflict, not a mocked one |
-| order-service | `OrderServiceTest`, `OrderSagaOrchestratorTest`, `OrderSagaEventHandlerTest`, `RequestFingerprintTest`, `OrderStatusTest`, publisher/outbox tests, `ServiceTokenProviderTest` (client-credentials caching) | `OrderApiIntegrationTest` (Postgres), `OrderKafkaIntegrationTest` (Postgres+Kafka), `OrderSagaIntegrationTest` (Postgres+Kafka — the whole Order→Inventory→Payment saga end to end over a real broker, with `MockRestServiceServer` standing in for the two downstream services so order-service stays independently testable), `ResilienceIntegrationTest` (no Testcontainers — a narrow Spring context slice, see [resilience.md](resilience.md)), `JwtResourceServerIntegrationTest` (no Testcontainers either — the platform-wide token-acceptance contract, see below), `OutboxEventRepositoryIntegrationTest` (Postgres, a `@DataJpaTest` slice — the table's own contract: database-assigned `sequence_no`, the oldest-per-aggregate claim query, the retention delete), `OutboxConcurrencyIntegrationTest` and `OutboxCleanupIntegrationTest` (Postgres+Kafka — two publishers racing one table, a failed send holding back its aggregate's stream, backoff, and concurrent retention runs; see [ADR 006](adr/006-outbox-concurrency-and-ordering.md)) |
+| order-service | `OrderServiceTest`, `OrderSagaOrchestratorTest`, `OrderSagaEventHandlerTest`, `RequestFingerprintTest`, `OrderStatusTest`, publisher/outbox tests, `ServiceTokenProviderTest` (client-credentials caching), `OrderCancellationListenerTest`, `StuckSagaReaperTest` | `OrderApiIntegrationTest` (Postgres), `OrderKafkaIntegrationTest` (Postgres+Kafka), `OrderSagaIntegrationTest` (Postgres+Kafka — the whole Order→Inventory→Payment saga end to end over a real broker, with `MockRestServiceServer` standing in for the two downstream services so order-service stays independently testable), `ResilienceIntegrationTest` (no Testcontainers — a narrow Spring context slice, see [resilience.md](resilience.md)), `JwtResourceServerIntegrationTest` (no Testcontainers either — the platform-wide token-acceptance contract, see below), `OrderCancellationCompensationIntegrationTest` and `StuckSagaReaperIntegrationTest` (Postgres+Kafka — cancellation compensation retried off the event, and the reaper's claim/lease/abandon behaviour including two instances racing; see [ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)), `OutboxEventRepositoryIntegrationTest` (Postgres, a `@DataJpaTest` slice — the table's own contract: database-assigned `sequence_no`, the oldest-per-aggregate claim query, the retention delete), `OutboxConcurrencyIntegrationTest` and `OutboxCleanupIntegrationTest` (Postgres+Kafka — two publishers racing one table, a failed send holding back its aggregate's stream, backoff, and concurrent retention runs; see [ADR 006](adr/006-outbox-concurrency-and-ordering.md)) |
 | payment-service | `MockPaymentProviderTest`, `PaymentServiceTest`, publisher/outbox tests | `PaymentApiIntegrationTest` (Postgres) |
 | delivery-service | `DeliveryServiceTest`, `ShipmentServiceTest`, `DeliveryAgentServiceTest`, publisher/outbox/listener tests | `DeliveryApiIntegrationTest` (Postgres) |
 | notification-service | `NotificationEventListenerTest` | `NotificationEventListenerIntegrationTest` (Kafka only — no database, see [service-boundaries.md](service-boundaries.md)) |
@@ -145,7 +145,7 @@ can be run directly: PostgreSQL 16, Redis 7.0, and a single-node Kafka 3.9 broke
 were installed and started in the sandbox, and **every** `*IntegrationTest` in the
 platform was executed against them — one class at a time, each against a freshly
 formatted broker and a freshly created database, by pointing a throwaway copy of the
-class at `localhost` instead of at a container. All twelve passed:
+class at `localhost` instead of at a container. All of them passed (twelve classes at the time; two more were added in Phase 17 and run the same way):
 
 | Test class | Tests |
 |---|---|
@@ -156,6 +156,8 @@ class at `localhost` instead of at a container. All twelve passed:
 | `DeliveryApiIntegrationTest` | 4 |
 | `OrderApiIntegrationTest` | 12 |
 | `OrderSagaIntegrationTest` | 3 |
+| `OrderCancellationCompensationIntegrationTest` | 3 |
+| `StuckSagaReaperIntegrationTest` | 5 |
 | `OrderKafkaIntegrationTest` | 3 |
 | `OutboxConcurrencyIntegrationTest` | 3 |
 | `OutboxCleanupIntegrationTest` | 3 |

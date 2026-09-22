@@ -267,6 +267,30 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       Docker still unavailable here, Postgres, Redis, and a Kafka broker were installed
       and run directly in the sandbox instead, and all twelve integration test classes now
       pass against them.
+- [x] **Phase 17 — Reliable compensation and a stuck-saga reaper**: two ways an order
+      could end up permanently wrong, both the same shape -- something had to happen next
+      and nothing owned making it happen. (1) Cancellation compensation ran inline in the
+      cancel request, *after* the CANCELLED status had committed, with every exception
+      caught and logged: a failed refund, or a pod dying in that window, left an order
+      cancelled with its stock still held and its payment still taken, and nothing that
+      would ever retry. `OrderService.cancel` now writes the `order.cancelled` outbox row
+      in the same transaction with a new `previousStatus` field, and a new
+      `OrderCancellationListener` compensates off that event -- so "cancelled" and "will
+      be compensated for" are one atomic fact, failures propagate into the existing retry
+      and dead-letter handling instead of a log line, and the HTTP response is unchanged.
+      (2) A saga that exhausted its Kafka retries simply stopped, leaving the order in
+      whichever state it reached, holding reservations forever, with nothing able to tell
+      it apart from an order progressing slowly. `StuckSagaReaper` claims such orders
+      (`FOR UPDATE SKIP LOCKED`, the same mechanism as the outbox poller) and either
+      re-runs the saga -- which every step is idempotent enough to resume -- or gives up:
+      release, refund if charged, mark FAILED, and announce it on a new `order.failed`
+      topic. Incrementing the new `saga_attempts` column refreshes `updated_at`, so the
+      claim doubles as a lease and two reaper instances never take the same order. `FAILED`
+      is now reachable from every state a saga can stall in; before, an order stuck in
+      `INVENTORY_RESERVED` had no terminal state at all. Three new metrics and two Grafana
+      panels -- `saga.stuck.count` is the one that matters, since nothing else here could
+      show an order that had quietly stopped. See
+      [ADR 008](docs/adr/008-reliable-compensation-and-stuck-saga-reaper.md).
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

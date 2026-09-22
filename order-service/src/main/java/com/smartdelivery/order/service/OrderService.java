@@ -113,22 +113,32 @@ public class OrderService {
 
     /**
      * Flips the order to CANCELLED if -- and only if -- it's still in a cancellable
-     * state (see OrderStatus). Compensation (releasing a reservation, refunding a
-     * payment) is a separate concern -- see OrderSagaOrchestrator.compensateCancellation,
-     * called by OrderController with the {@link OrderCancellationResult#previousStatus()}
-     * this method captures, since by the time an Order's status can be read back
-     * it's already CANCELLED. The outbox write happens here, inside the same
-     * transaction as the cancellation itself.
+     * state (see OrderStatus), and records the fact in the outbox inside this same
+     * transaction.
+     *
+     * Compensation -- releasing a reservation, refunding a payment -- is deliberately
+     * *not* done here, and as of Phase 17 (ADR 008) is not done by the caller either.
+     * It happens when OrderCancellationListener consumes the event this method writes.
+     * Before that it ran in the controller, after this transaction had already
+     * committed: if the refund call failed, or the pod died in between, the order was
+     * CANCELLED with its stock still held and its payment still taken, and nothing
+     * anywhere would ever try again. Writing the event in the same transaction as the
+     * cancellation makes "the order was cancelled" and "something will compensate for
+     * it" the same atomic fact.
+     *
+     * The event carries {@code previousStatus} because that is what compensation
+     * decides against, and by the time any consumer reads the order back it is already
+     * CANCELLED.
      */
     @Transactional
-    public OrderCancellationResult cancel(UUID orderId, UUID requestingUserId, boolean isAdmin) {
+    public Order cancel(UUID orderId, UUID requestingUserId, boolean isAdmin) {
         Order order = fetch(orderId);
         assertOwnerOrAdmin(order, requestingUserId, isAdmin);
         OrderStatus previousStatus = order.getStatus();
         order.cancel();
-        eventPublisher.publishOrderCancelled(order);
+        eventPublisher.publishOrderCancelled(order, previousStatus);
         meterRegistry.counter("order.saga.outcomes", "outcome", "cancelled").increment();
-        return new OrderCancellationResult(order, previousStatus);
+        return order;
     }
 
     private Order fetch(UUID orderId) {

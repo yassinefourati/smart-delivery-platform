@@ -2,7 +2,7 @@
   "title": "Smart Delivery Platform - Overview",
   "uid": "sdp-platform-overview",
   "schemaVersion": 39,
-  "version": 2,
+  "version": 3,
   "editable": true,
   "timezone": "browser",
   "time": { "from": "now-1h", "to": "now" },
@@ -210,6 +210,43 @@
         }
       ],
       "description": "Published rows deleted past outbox.retention (default 7d). Flat at zero on a deployment younger than the retention window; a table that still reclaims nothing after that is a cleanup job that is not running."
+    },
+    {
+      "id": 14,
+      "title": "Orders with a stuck saga",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 48 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "max(saga_stuck_count)",
+          "legendFormat": "stuck orders"
+        }
+      ],
+      "description": "Orders sitting in a resumable saga state (CREATED, INVENTORY_RESERVATION_PENDING, INVENTORY_RESERVED, PAYMENT_PENDING) past saga.stuck-threshold (ADR 008). Should sit at or near zero: StuckSagaReaper clears each one within a run. A number that stays up means sagas are stalling faster than the reaper resolves them -- orders holding stock that no other signal on this dashboard would show."
+    },
+    {
+      "id": 15,
+      "title": "Stuck-saga reaper outcomes",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 56 },
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(saga_reaper_retried_total[15m])",
+          "legendFormat": "retried"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "rate(saga_reaper_failed_total[15m])",
+          "legendFormat": "given up on"
+        }
+      ],
+      "description": "Sagas the reaper restarted versus ones it abandoned after saga.max-attempts (ADR 008). Retries are the system healing itself and a low rate is unremarkable; anything on the 'given up on' series is an order that was compensated and marked FAILED, which is a customer-visible outcome and worth alerting on."
     }
   ]
 }

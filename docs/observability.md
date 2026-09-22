@@ -99,6 +99,25 @@ different problem from the whole broker being unreachable — and because a fail
 back the rest of *that aggregate's* events by design, so a sustained non-zero rate on one
 event type means a stalled stream for those aggregates, not just a retry.
 
+**Stuck-saga metrics (Phase 17).** Three meters in order-service
+(`StuckSagaReaper`, see [ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)):
+
+| Metric | Type | What it says |
+|---|---|---|
+| `saga.stuck.count` | gauge | Orders in a resumable saga state past `saga.stuck-threshold`. |
+| `saga.reaper.retried` | counter | Sagas the reaper restarted. |
+| `saga.reaper.failed` | counter | Sagas it gave up on, compensated, and marked FAILED. |
+
+The **gauge** is the one to alert on, and it is the reason this instrumentation exists: a
+saga that exhausts its Kafka retries leaves an order holding stock, and nothing else in
+this platform distinguishes an order that has *stopped* progressing from one progressing
+slowly. It should sit at or near zero — the reaper clears each order within a run — so a
+number that stays up means sagas are stalling faster than the reaper resolves them.
+
+The two counters say what the reaper did about it. Retries are the system healing itself
+and a low rate is unremarkable; anything on `saga.reaper.failed` is an order that was
+compensated and failed, which is customer-visible and worth alerting on separately.
+
 ## Dashboards → Grafana (Phase 12)
 
 A `grafana` service in `docker-compose.yml` (reachable at `localhost:3000`, anonymous
@@ -114,7 +133,8 @@ from `infrastructure/grafana/provisioning`:
   a database — api-gateway and notification-service have no pool and report no series on
   that panel); and, added in Phase 15, five outbox panels — backlog and oldest
   unpublished event per service, publish and failure rates by event type, and rows
-  reclaimed by the cleanup job.
+  reclaimed by the cleanup job; and, added in Phase 17, stuck-saga count and reaper
+  outcomes.
 
 **Scoped out.** A Kafka consumer lag panel is not included. It would need a
 `kafka-exporter` (or Prometheus's own experimental Kafka support) added as another

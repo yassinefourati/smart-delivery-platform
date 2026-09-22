@@ -59,6 +59,16 @@ public class Order {
     @OrderBy("createdAt ASC")
     private List<OrderItem> items = new ArrayList<>();
 
+    /**
+     * How many times {@code StuckSagaReaper} has picked this order up (ADR 008). Read
+     * before the increment to decide between "retry the saga" and "give up on it", and
+     * incremented by the reaper's claim -- which, because Hibernate refreshes
+     * {@code updatedAt} on any write, doubles as the lease that keeps a second reaper
+     * instance from picking up the same order.
+     */
+    @Column(name = "saga_attempts", nullable = false)
+    private int sagaAttempts;
+
     @CreationTimestamp
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -102,6 +112,11 @@ public class Order {
         transitionTo(OrderStatus.CANCELLED);
     }
 
+    /** @return the attempt count *before* this one, which is what the reaper decides on. */
+    public int recordSagaAttempt() {
+        return sagaAttempts++;
+    }
+
     public UUID getId() {
         return id;
     }
@@ -132,6 +147,10 @@ public class Order {
 
     public List<OrderItem> getItems() {
         return items;
+    }
+
+    public int getSagaAttempts() {
+        return sagaAttempts;
     }
 
     public Instant getCreatedAt() {
