@@ -21,9 +21,13 @@ spring:
               predicates:
                 - Path=/api/v1/products/**,/api/v1/categories/**
             - id: inventory-service
+              # /api/v1/warehouses/** was missing until Phase 18 -- found the first time
+              # anything drove the platform end to end through the gateway, which is what
+              # scripts/e2e-smoke.sh now does on every CI run. Warehouse management was
+              # simply unreachable for any client that went through the front door.
               uri: ${INVENTORY_SERVICE_URI:http://localhost:8083}
               predicates:
-                - Path=/api/v1/inventory/**
+                - Path=/api/v1/inventory/**,/api/v1/warehouses/**
             - id: order-service
               uri: ${ORDER_SERVICE_URI:http://localhost:8084}
               predicates:

@@ -179,10 +179,12 @@ class OrderServiceTest {
         Order order = orderWithStatus(ownerId, OrderStatus.CREATED);
         when(orderRepository.findById(order.getId())).thenReturn(Optional.of(order));
 
-        OrderCancellationResult result = service.cancel(order.getId(), ownerId, false);
+        Order cancelled = service.cancel(order.getId(), ownerId, false);
 
-        assertThat(result.order().getStatus()).isEqualTo(OrderStatus.CANCELLED);
-        assertThat(result.previousStatus()).isEqualTo(OrderStatus.CREATED);
+        assertThat(cancelled.getStatus()).isEqualTo(OrderStatus.CANCELLED);
+        // The event -- not the return value -- is what carries the previous status to
+        // whoever compensates, now that the controller no longer does (ADR 008).
+        verify(eventPublisher).publishOrderCancelled(order, OrderStatus.CREATED);
     }
 
     @Test

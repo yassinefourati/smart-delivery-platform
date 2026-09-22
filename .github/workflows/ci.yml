@@ -9,14 +9,15 @@ on:
 permissions:
   contents: read
 
-# Static analysis (Checkstyle/SpotBugs/PMD) is intentionally not wired in yet -- with
-# only skeleton applications in the tree there is nothing meaningful for it to check.
-# It's added alongside real business logic in an early service-implementation phase,
-# not bolted on afterward. Compilation + tests are still a real static/dynamic gate.
+# Quality gates live inside `mvn verify` rather than in separate jobs, so that one
+# command is the whole gate and a developer running it locally sees exactly what CI sees
+# (Phase 18, docs/ci-cd.md): JaCoCo enforces a per-module line-coverage floor measured
+# from the real suite, SpotBugs fails on any finding not explicitly justified in
+# spotbugs-exclude.xml, and each service's ArchUnit test enforces its layering.
 
 jobs:
   build-and-test:
-    name: Build & test (Maven reactor)
+    name: Build, test & quality gates (Maven reactor)
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -29,8 +30,20 @@ jobs:
           java-version: '21'
           cache: maven
 
-      - name: Build and run unit + integration tests
+      # One command, every gate: compilation, unit tests, Testcontainers integration
+      # tests, JaCoCo coverage floors, SpotBugs, and the ArchUnit layering rules.
+      - name: Build, test, and enforce quality gates
         run: mvn -B clean verify
+
+      - name: Publish coverage and SpotBugs reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: quality-reports
+          path: |
+            '**/target/site/jacoco/**'
+            '**/target/spotbugsXml.xml'
+          if-no-files-found: ignore
 
       - name: Publish test reports
         if: always()
@@ -68,9 +81,38 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # A PR build (including one from a fork) only needs to prove the image builds --
-      # it's never pushed, so it never needs registry credentials. Only a push to main
-      # (a merged, reviewed change) publishes.
+      # Built and loaded into the local daemon first so Trivy has something to scan.
+      # Nothing is published until the scan has passed -- a vulnerable image that is
+      # already in the registry is a vulnerable image somebody can pull.
+      - name: Build image locally
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.service }}/Dockerfile
+          load: true
+          tags: local/${{ matrix.service }}:ci
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+      # CRITICAL only, and that is a deliberate line rather than a lazy one: scanning a
+      # JRE base image at HIGH on a schedule nobody owns produces a red build every few
+      # weeks for something that is not exploitable here and has no fix available, and a
+      # gate people learn to ignore is worse than no gate. `ignore-unfixed` is off, so a
+      # CRITICAL with no patch yet still fails -- if the base image cannot be fixed, that
+      # is a decision to take explicitly, not one to let the scanner make quietly.
+      - name: Scan image for CRITICAL vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: local/${{ matrix.service }}:ci
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          vuln-type: os,library
+
+      # A PR build (including one from a fork) only needs to prove the image builds and
+      # scans clean -- it is never pushed, so it never needs registry credentials. Only a
+      # push to main (a merged, reviewed change) publishes.
       - name: Log in to GHCR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/login-action@v3
@@ -81,12 +123,14 @@ jobs:
 
       # github.repository is already all-lowercase for this repo (a GHCR image name
       # requirement) -- see docs/ci-cd.md if this is ever forked under a mixed-case name.
-      - name: Build image (published only from a push to main)
+      # Re-runs the same build, which is a cache hit end to end after the step above.
+      - name: Publish image (only from a push to main)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
           context: .
           file: ${{ matrix.service }}/Dockerfile
-          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          push: true
           tags: |
             ghcr.io/${{ github.repository }}/${{ matrix.service }}:latest
             ghcr.io/${{ github.repository }}/${{ matrix.service }}:${{ github.sha }}
@@ -102,3 +146,36 @@ jobs:
 
       - name: Validate compose configuration
         run: docker compose config --quiet
+
+  # The one job that exercises the platform as a platform: eight services started
+  # together, finding each other, sharing a broker, carrying an order across process
+  # boundaries. Testcontainers proves each service works against real infrastructure;
+  # only this proves the system does. See scripts/e2e-smoke.sh and docs/ci-cd.md.
+  e2e-smoke:
+    name: End-to-end smoke test (Docker Compose)
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: Run the smoke test
+        run: scripts/e2e-smoke.sh
+
+      # The logs are the only way to diagnose a failure that happened inside eight
+      # containers that no longer exist, so they are uploaded whether or not it passed.
+      - name: Upload Compose logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-compose-logs
+          path: target/e2e-logs/**
+          if-no-files-found: ignore

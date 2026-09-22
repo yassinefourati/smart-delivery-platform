@@ -77,6 +77,27 @@ it. Existing rows are backfilled in `created_at` order rather than left to a tab
 rewrite's arbitrary order, so an in-flight `PENDING` backlog is not reordered by the
 migration itself.
 
+## Stuck-saga bookkeeping (Phase 17)
+
+`orders` gained one column, `saga_attempts INT NOT NULL DEFAULT 0`
+([ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)). `updated_at` already
+existed and is maintained by Hibernate's `@UpdateTimestamp` on every write, so a state
+transition moves it — which is what lets "untouched for longer than
+`saga.stuck-threshold`" mean "this saga has stalled".
+
+Incrementing `saga_attempts` is also how `StuckSagaReaper` takes out its lease: the
+increment is a write, the write refreshes `updated_at`, and the order therefore leaves the
+eligible set until the threshold passes again. One column serves both the retry budget and
+the concurrency control.
+
+The supporting index is partial, because in steady state almost every row is in a terminal
+state the reaper never looks at:
+
+```sql
+CREATE INDEX idx_orders_stuck_saga ON orders (updated_at)
+    WHERE status IN ('CREATED', 'INVENTORY_RESERVATION_PENDING', 'INVENTORY_RESERVED', 'PAYMENT_PENDING');
+```
+
 ## Migration ownership
 
 A service's Flyway migrations are that service's alone to write and run — no

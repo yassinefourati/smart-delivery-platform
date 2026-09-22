@@ -108,6 +108,21 @@ services:
     client-id: ${ORDER_SERVICE_CLIENT_ID:order-service}
     client-secret: ${ORDER_SERVICE_CLIENT_SECRET:local-dev-only-order-service-secret}
 
+# Stuck-saga reaper (ADR 008). A saga whose Kafka retries are exhausted leaves its order
+# in a resumable state holding stock, with nothing that would ever look at it again; this
+# is what does.
+saga:
+  # How long an order may sit untouched in a resumable state before its saga counts as
+  # stuck. Must be comfortably longer than a healthy saga takes end to end, including
+  # Spring Kafka's own three retries, or the reaper races the saga it means to rescue.
+  # It is also the lease the reaper's claim takes on an order.
+  stuck-threshold: ${SAGA_STUCK_THRESHOLD:5m}
+  # Re-runs of startSaga (idempotent, so a retry resumes rather than repeats) before the
+  # reaper gives up, compensates, and marks the order FAILED. Counted per order.
+  max-attempts: ${SAGA_MAX_ATTEMPTS:3}
+  batch-size: ${SAGA_REAPER_BATCH_SIZE:50}
+  reaper-interval-ms: ${SAGA_REAPER_INTERVAL_MS:60000}
+
 # The transactional outbox (ADR 004) and its concurrency/retention behavior (ADR 006).
 # Every value here is safe to leave alone; they exist so a deployment that publishes far
 # more, or far fewer, events than this one can tune without a code change.

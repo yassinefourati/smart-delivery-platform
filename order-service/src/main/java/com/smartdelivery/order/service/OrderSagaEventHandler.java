@@ -2,6 +2,7 @@ package com.smartdelivery.order.service;
 
 import com.smartdelivery.order.domain.Order;
 import com.smartdelivery.order.domain.OrderStatus;
+import com.smartdelivery.order.event.OrderEventPublisher;
 import com.smartdelivery.order.repository.OrderRepository;
 import io.micrometer.core.instrument.MeterRegistry;
 import org.slf4j.Logger;
@@ -32,10 +33,13 @@ public class OrderSagaEventHandler {
     private static final Logger log = LoggerFactory.getLogger(OrderSagaEventHandler.class);
 
     private final OrderRepository orderRepository;
+    private final OrderEventPublisher eventPublisher;
     private final MeterRegistry meterRegistry;
 
-    public OrderSagaEventHandler(OrderRepository orderRepository, MeterRegistry meterRegistry) {
+    public OrderSagaEventHandler(OrderRepository orderRepository, OrderEventPublisher eventPublisher,
+                                 MeterRegistry meterRegistry) {
         this.orderRepository = orderRepository;
+        this.eventPublisher = eventPublisher;
         this.meterRegistry = meterRegistry;
     }
 
@@ -96,6 +100,38 @@ public class OrderSagaEventHandler {
     @Transactional
     public void handleDeliveryCompleted(UUID orderId) {
         applyTransition(orderId, OrderStatus.OUT_FOR_DELIVERY, OrderStatus.DELIVERED, "DeliveryCompleted");
+    }
+
+    /**
+     * Marks an order FAILED from whichever resumable state it was stuck in, and writes the
+     * {@code order.failed} event in the same transaction (ADR 008). Called by
+     * {@code StuckSagaReaper} through {@code OrderSagaOrchestrator.abandonSaga}, after
+     * compensation has already run.
+     *
+     * Unlike the handlers above it does not assert a single expected source state: a stuck
+     * saga can be abandoned from any of the four resumable ones. It still goes through the
+     * state machine, so an order that finished or was cancelled in the meantime -- the race
+     * the reaper's own lease makes unlikely but not impossible -- is left alone rather than
+     * dragged backwards out of a terminal state.
+     */
+    @Transactional
+    public void abandon(UUID orderId, String reason) {
+        var maybeOrder = orderRepository.findById(orderId);
+        if (maybeOrder.isEmpty()) {
+            log.warn("Asked to abandon unknown order {}; ignoring", orderId);
+            return;
+        }
+
+        Order order = maybeOrder.get();
+        OrderStatus previousStatus = order.getStatus();
+        if (!previousStatus.canTransitionTo(OrderStatus.FAILED)) {
+            log.info("Order {} is {} and can no longer be failed; leaving it alone", orderId, previousStatus);
+            return;
+        }
+
+        order.transitionTo(OrderStatus.FAILED);
+        eventPublisher.publishOrderFailed(order, previousStatus, reason);
+        recordOutcome(OrderStatus.FAILED);
     }
 
     private void applyTransition(UUID orderId, OrderStatus expectedFrom, OrderStatus target, String eventType) {

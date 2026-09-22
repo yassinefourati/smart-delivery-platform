@@ -4,7 +4,6 @@ import com.smartdelivery.order.dto.CreateOrderRequest;
 import com.smartdelivery.order.dto.OrderPageResponse;
 import com.smartdelivery.order.dto.OrderResponse;
 import com.smartdelivery.order.dto.OrderStatusResponse;
-import com.smartdelivery.order.service.OrderSagaOrchestrator;
 import com.smartdelivery.order.service.OrderService;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
@@ -31,11 +30,9 @@ import java.util.UUID;
 public class OrderController {
 
     private final OrderService orderService;
-    private final OrderSagaOrchestrator sagaOrchestrator;
 
-    public OrderController(OrderService orderService, OrderSagaOrchestrator sagaOrchestrator) {
+    public OrderController(OrderService orderService) {
         this.orderService = orderService;
-        this.sagaOrchestrator = sagaOrchestrator;
     }
 
     @PostMapping
@@ -62,11 +59,18 @@ public class OrderController {
         return ResponseEntity.ok(OrderStatusResponse.from(order));
     }
 
+    /**
+     * Returns the cancelled order, exactly as before. What changed in Phase 17 is what
+     * happens after: compensation is no longer invoked from here, where a failed refund
+     * or a dying pod lost it silently. OrderService.cancel writes an {@code
+     * order.cancelled} outbox row in the same transaction as the cancellation, and
+     * OrderCancellationListener compensates off that event -- retryable, and
+     * dead-lettered if it cannot succeed. See ADR 008.
+     */
     @PostMapping("/{id}/cancel")
     public ResponseEntity<OrderResponse> cancel(Authentication authentication, @PathVariable UUID id) {
-        var result = orderService.cancel(id, currentUserId(authentication), isAdmin(authentication));
-        sagaOrchestrator.compensateCancellation(result.order(), result.previousStatus());
-        return ResponseEntity.ok(OrderResponse.from(result.order()));
+        var order = orderService.cancel(id, currentUserId(authentication), isAdmin(authentication));
+        return ResponseEntity.ok(OrderResponse.from(order));
     }
 
     @GetMapping("/user/{userId}")

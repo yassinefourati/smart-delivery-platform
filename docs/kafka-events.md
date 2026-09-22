@@ -55,7 +55,8 @@ reintroducing.
 | Topic | Producer | Consumers | Payload highlights |
 |---|---|---|---|
 | `order.created` | order-service | inventory-service, notification-service | orderId, userId, items[], totalAmount |
-| `order.cancelled` | order-service | inventory-service, delivery-service, notification-service | orderId, reason |
+| `order.cancelled` | order-service | **order-service** (compensation), notification-service | orderId, userId, reason, previousStatus |
+| `order.failed` | order-service | notification-service | orderId, userId, reason, previousStatus |
 | `inventory.reserved` | inventory-service | order-service | orderId, reservationId |
 | `inventory.released` | inventory-service | order-service | orderId, reservationId |
 | `inventory.failed` | inventory-service | order-service, notification-service | orderId, reason (e.g. `INSUFFICIENT_STOCK`) |
@@ -72,6 +73,21 @@ publishes `delivery.assigned`; that agent marking the delivery done publishes
 `delivery.completed`. order-service's handling of all three has been real and tested
 since Phase 6 (`OrderSagaEventHandler`) -- Phase 9 only had to make delivery-service
 actually publish them, no order-service change was needed.
+
+**order-service consumes its own `order.cancelled`** (Phase 17,
+[ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)), in a consumer group of
+its own so it does not compete with the saga listeners'. That is what makes cancellation
+compensation retryable: it used to run inline in the cancel request, where a failed refund
+was logged and forgotten. `previousStatus` was added to the payload for it -- purely
+additive, and by the time a consumer reads the order back it is already CANCELLED, so
+nothing else carries what there is to compensate. The table above also corrects a
+long-standing overstatement: inventory-service and delivery-service were listed as
+consumers of `order.cancelled` and have never had a listener for it.
+
+**`order.failed` is new in Phase 17.** It announces an order the platform gave up on --
+today, one whose saga `StuckSagaReaper` abandoned -- as distinct from one a customer
+cancelled. notification-service renders the two differently, because "we could not
+complete your order" and "your cancellation went through" are not the same message.
 
 `delivery.assigned`'s payload includes `orderId` (not just `shipmentId`/`agentId`) so that
 order-service -- which only knows about shipments by their effect on an order, not as a

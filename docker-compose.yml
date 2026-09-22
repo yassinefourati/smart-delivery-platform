@@ -140,6 +140,12 @@ services:
       # wrong anywhere else, because tokens die with the container and a second replica
       # would sign with a different key. A real deployment mounts a PKCS#8 PEM.
       ORDER_SERVICE_CLIENT_SECRET: local-dev-only-order-service-secret
+      # Creates one ADMIN account at startup so a fresh stack has somebody who can
+      # administer it, and so scripts/e2e-smoke.sh has an admin to work with.
+      # Local-Compose-only, like every other credential in this file; a real deployment
+      # leaves these unset. See BootstrapAdminInitializer.
+      BOOTSTRAP_ADMIN_EMAIL: admin@smart-delivery.local
+      BOOTSTRAP_ADMIN_PASSWORD: local-dev-only-admin-password
     depends_on:
       postgres:
         condition: service_healthy

@@ -77,11 +77,35 @@ already succeeded before it failed:
 Compensating actions are themselves idempotent — a reservation release or a refund can
 be safely retried if the acknowledgement is lost, because both Inventory Service and
 Payment Service treat "release/refund an already-released/refunded thing" as a no-op,
-not an error. A compensation call that itself fails is logged, not retried inline or
-allowed to abort the rest of the compensation loop — see `OrderSagaOrchestrator`'s
-Javadoc for why a stuck reservation here is an accepted, flagged gap (needing a
-reconciliation job, not built here) rather than something that should cascade into a
-bigger failure.
+not an error. (Tested where the guarantee lives: `InventoryApiIntegrationTest` for
+release, `PaymentServiceTest` for refund.)
+
+### Cancellation compensation is driven by the event, not the request (Phase 17)
+
+Until Phase 17, `OrderController.cancel` compensated inline: `OrderService.cancel`
+committed the CANCELLED status, and the controller then called the orchestrator on the
+same request thread, outside that transaction, with every exception caught and logged.
+A refund that failed, or a pod that died in that window, left an order CANCELLED with its
+stock still reserved and its payment still taken — and nothing anywhere that would ever
+look at it again.
+
+Now `OrderService.cancel` writes the `order.cancelled` outbox row in the same transaction
+as the cancellation (it already did) with a new `previousStatus` field, and
+`OrderCancellationListener` — order-service consuming its own event, in its own consumer
+group — compensates off it. Two things follow:
+
+- **"Cancelled" and "will be compensated for" are one atomic fact.** Nothing can commit
+  one without the other.
+- **Compensation failures now throw rather than being logged.** On an HTTP thread there
+  was nothing to retry, so logging was all there was; on a listener, throwing is what
+  reaches the bounded retry and dead-letter handling every other consumer here already
+  has. Every line is attempted before anything is raised, so a retry has as little left to
+  do as possible.
+
+`previousStatus` has to travel on the event because nothing else carries it: by the time a
+consumer reads the order back it is already CANCELLED, which does not say whether there is
+a reservation to release or a payment to refund. See
+[ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md).
 
 ## Deduct: converting a reservation into a permanent stock reduction
 
@@ -126,6 +150,33 @@ infrastructure reason (not a clean business rejection — see
 `@KafkaListener` and Spring Kafka retries the entire `startSaga` call. The retry simply
 re-runs already-completed idempotent steps (they no-op) and picks back up from wherever
 it actually left off — there's no separate checkpoint/resume bookkeeping to get wrong.
+
+### …but something has to do the resuming (Phase 17)
+
+Resumability is a property of the *design*; it only helps if something actually re-drives
+the saga. Until Phase 17 nothing did. Spring Kafka's three retries are exhausted in a few
+seconds; after that the message is dead-lettered and the order is left in whichever state
+it reached — CREATED, INVENTORY_RESERVATION_PENDING, INVENTORY_RESERVED or PAYMENT_PENDING
+— holding reservations forever. Nothing noticed, and nothing could: an order that has
+stopped progressing looks exactly like one progressing slowly.
+
+`StuckSagaReaper` is what re-drives it. Every `saga.reaper-interval-ms` it claims orders
+in a resumable state that nothing has touched for longer than `saga.stuck-threshold`
+(default 5m) and either:
+
+- **re-runs `startSaga`**, if the order is under `saga.max-attempts` (default 3) — which
+  is exactly the resumability above, finally being exercised; or
+- **gives up**: release every reservation, refund if anything was charged, mark the order
+  FAILED through the state machine, and publish `order.failed` through the outbox. An
+  order that cannot be completed and is never released is worse than one honestly failed.
+
+The claim is `FOR UPDATE SKIP LOCKED`, the same mechanism the outbox poller uses
+([ADR 006](adr/006-outbox-concurrency-and-ordering.md)), and it doubles as a lease:
+incrementing `saga_attempts` refreshes `updated_at`, so a claimed order leaves the
+eligible set until the threshold passes again. Two reaper instances therefore never work
+the same order. See [order-flow.md](order-flow.md#the-reapers-path-phase-17) for the state
+diagram and [ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md) for the
+design.
 
 ## Idempotency and duplicate events
 

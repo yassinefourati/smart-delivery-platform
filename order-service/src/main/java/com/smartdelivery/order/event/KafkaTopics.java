@@ -6,6 +6,8 @@ public final class KafkaTopics {
     // Published by order-service
     public static final String ORDER_CREATED = "order.created";
     public static final String ORDER_CANCELLED = "order.cancelled";
+    /** An order the platform gave up on, as opposed to one a customer cancelled -- see ADR 008. */
+    public static final String ORDER_FAILED = "order.failed";
 
     // Consumed by order-service
     public static final String INVENTORY_RESERVED = "inventory.reserved";

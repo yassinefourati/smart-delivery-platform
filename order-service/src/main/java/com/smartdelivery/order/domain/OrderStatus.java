@@ -27,10 +27,16 @@ public enum OrderStatus {
     private static final Map<OrderStatus, Set<OrderStatus>> ALLOWED_TRANSITIONS = new EnumMap<>(OrderStatus.class);
 
     static {
-        ALLOWED_TRANSITIONS.put(CREATED, EnumSet.of(INVENTORY_RESERVATION_PENDING, CANCELLED));
+        // FAILED is reachable from every state the saga can be stuck in, not just from
+        // INVENTORY_RESERVATION_PENDING. A saga that exhausts its retries has to end
+        // somewhere, and StuckSagaReaper (ADR 008) marks it FAILED from wherever it got
+        // to -- an order stalled in INVENTORY_RESERVED with no way to reach a terminal
+        // state would simply sit there forever, which is the problem the reaper exists
+        // to fix.
+        ALLOWED_TRANSITIONS.put(CREATED, EnumSet.of(INVENTORY_RESERVATION_PENDING, FAILED, CANCELLED));
         ALLOWED_TRANSITIONS.put(INVENTORY_RESERVATION_PENDING, EnumSet.of(INVENTORY_RESERVED, FAILED, CANCELLED));
-        ALLOWED_TRANSITIONS.put(INVENTORY_RESERVED, EnumSet.of(PAYMENT_PENDING, CANCELLED));
-        ALLOWED_TRANSITIONS.put(PAYMENT_PENDING, EnumSet.of(PAID, CANCELLED));
+        ALLOWED_TRANSITIONS.put(INVENTORY_RESERVED, EnumSet.of(PAYMENT_PENDING, FAILED, CANCELLED));
+        ALLOWED_TRANSITIONS.put(PAYMENT_PENDING, EnumSet.of(PAID, FAILED, CANCELLED));
         ALLOWED_TRANSITIONS.put(PAID, EnumSet.of(SHIPMENT_CREATED, CANCELLED));
         ALLOWED_TRANSITIONS.put(SHIPMENT_CREATED, EnumSet.of(OUT_FOR_DELIVERY));
         ALLOWED_TRANSITIONS.put(OUT_FOR_DELIVERY, EnumSet.of(DELIVERED));

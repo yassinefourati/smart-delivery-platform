@@ -2,6 +2,7 @@ package com.smartdelivery.order.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdelivery.order.domain.Order;
+import com.smartdelivery.order.domain.OrderStatus;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -41,9 +42,21 @@ public class OrderEventPublisher {
         record(KafkaTopics.ORDER_CREATED, "OrderCreated", order.getId(), payload);
     }
 
-    public void publishOrderCancelled(Order order) {
-        var payload = new OrderCancelledPayload(order.getId(), order.getUserId(), "Cancelled by customer");
+    /**
+     * {@code previousStatus} is captured by the caller before the order is flipped to
+     * CANCELLED, because it is what compensation decides against and nothing else
+     * carries it -- see OrderCancellationListener and ADR 008.
+     */
+    public void publishOrderCancelled(Order order, OrderStatus previousStatus) {
+        var payload = new OrderCancelledPayload(
+                order.getId(), order.getUserId(), "Cancelled by customer", previousStatus.name());
         record(KafkaTopics.ORDER_CANCELLED, "OrderCancelled", order.getId(), payload);
+    }
+
+    /** An order abandoned by {@code StuckSagaReaper} after its saga exhausted its retries. */
+    public void publishOrderFailed(Order order, OrderStatus previousStatus, String reason) {
+        var payload = new OrderFailedPayload(order.getId(), order.getUserId(), reason, previousStatus.name());
+        record(KafkaTopics.ORDER_FAILED, "OrderFailed", order.getId(), payload);
     }
 
     private void record(String topic, String eventType, UUID aggregateId, Object payload) {

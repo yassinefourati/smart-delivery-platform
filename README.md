@@ -267,6 +267,66 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       Docker still unavailable here, Postgres, Redis, and a Kafka broker were installed
       and run directly in the sandbox instead, and all twelve integration test classes now
       pass against them.
+- [x] **Phase 17 — Reliable compensation and a stuck-saga reaper**: two ways an order
+      could end up permanently wrong, both the same shape -- something had to happen next
+      and nothing owned making it happen. (1) Cancellation compensation ran inline in the
+      cancel request, *after* the CANCELLED status had committed, with every exception
+      caught and logged: a failed refund, or a pod dying in that window, left an order
+      cancelled with its stock still held and its payment still taken, and nothing that
+      would ever retry. `OrderService.cancel` now writes the `order.cancelled` outbox row
+      in the same transaction with a new `previousStatus` field, and a new
+      `OrderCancellationListener` compensates off that event -- so "cancelled" and "will
+      be compensated for" are one atomic fact, failures propagate into the existing retry
+      and dead-letter handling instead of a log line, and the HTTP response is unchanged.
+      (2) A saga that exhausted its Kafka retries simply stopped, leaving the order in
+      whichever state it reached, holding reservations forever, with nothing able to tell
+      it apart from an order progressing slowly. `StuckSagaReaper` claims such orders
+      (`FOR UPDATE SKIP LOCKED`, the same mechanism as the outbox poller) and either
+      re-runs the saga -- which every step is idempotent enough to resume -- or gives up:
+      release, refund if charged, mark FAILED, and announce it on a new `order.failed`
+      topic. Incrementing the new `saga_attempts` column refreshes `updated_at`, so the
+      claim doubles as a lease and two reaper instances never take the same order. `FAILED`
+      is now reachable from every state a saga can stall in; before, an order stuck in
+      `INVENTORY_RESERVED` had no terminal state at all. Three new metrics and two Grafana
+      panels -- `saga.stuck.count` is the one that matters, since nothing else here could
+      show an order that had quietly stopped. See
+      [ADR 008](docs/adr/008-reliable-compensation-and-stuck-saga-reaper.md).
+- [x] **Phase 18 — Quality gates and an end-to-end smoke test**: everything here exists to
+      catch a class of bug the existing tests structurally could not. **JaCoCo** floors are
+      *measured, not chosen* — the full suite was run, per-module line coverage read off the
+      report, and each floor set to that number rounded down (87-96%, see
+      [docs/ci-cd.md](docs/ci-cd.md#line-coverage-jacoco)); the gate's job is "do not go
+      backwards", not "reach 80%". **SpotBugs** at `Max`/`Medium` produced 88 findings: 87
+      `EI_EXPOSE_REP` and one `CT_CONSTRUCTOR_THROW` are excluded as whole categories with
+      written justifications in `spotbugs-exclude.xml` (never per class, so a genuine new
+      instance still surfaces), because defensive-copying Spring-injected collaborators and
+      Hibernate-managed collections would break the frameworks this is built on. The 88th was
+      real and is fixed: `PaymentServiceClient` dereferenced the response body without a null
+      check, so a 2xx with an empty body would have been read as a *failed* charge and
+      compensated — releasing stock for an order that may well have been charged. **ArchUnit**
+      rules in every service pin the layering, the important one being that only `event`
+      packages may touch `KafkaTemplate` — the rule that keeps the outbox from being bypassed.
+      notification-service gets bespoke rules rather than `allowEmptyShould`, which would have
+      turned "matched no classes" into a silent pass for the other six. **Trivy** scans each
+      image before it can be published, failing on CRITICAL only and deliberately so
+      ([why](docs/ci-cd.md#why-critical-only)). Finally, `scripts/e2e-smoke.sh` drives the real
+      compose stack **through the gateway only** — register, log in, stock a product, place an
+      order and follow it to `PAID`, replay the `Idempotency-Key` and get the same order, blow
+      past available stock and watch the reservations come back, cancel a paid order and watch
+      the payment refund — dumping `docker compose logs` as a CI artifact when it fails. That
+      required a first admin to exist, so user-service gained a `BootstrapAdminInitializer`
+      gated on two environment variables being set (deliberately *not* declared in
+      `application.yml`, since `@ConditionalOnProperty` reads a blank value as present).
+      Running it found **two more pre-existing bugs**, neither caused by this phase and
+      neither catchable by any test that existed before it: none of the eight jars were
+      executable — the build imports the Spring Boot BOM instead of inheriting from
+      `spring-boot-starter-parent`, so `spring-boot-maven-plugin` had no `repackage`
+      execution and every published image would have died with `no main manifest attribute`,
+      which CI never noticed because `docker-build` only ever *built* images and never started
+      one — and `/api/v1/warehouses/**` had never been routed through the gateway at all, so
+      warehouse management only worked if you bypassed the front door. Both fixed, both
+      covered. See [docs/ci-cd.md](docs/ci-cd.md) and
+      [docs/testing.md](docs/testing.md#two-more-pre-existing-bugs-found-in-phase-18).
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

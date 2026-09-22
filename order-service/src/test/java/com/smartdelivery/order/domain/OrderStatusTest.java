@@ -66,4 +66,26 @@ class OrderStatusTest {
             assertThat(terminal.canTransitionTo(candidate)).isFalse();
         }
     }
+
+    /**
+     * A saga can stall in any of the four resumable states, and StuckSagaReaper has to be
+     * able to end it from wherever it got to (ADR 008). Before Phase 17 only
+     * INVENTORY_RESERVATION_PENDING could reach FAILED, so an order stalled in
+     * INVENTORY_RESERVED had no terminal state to go to at all.
+     */
+    @Test
+    void anyResumableStateCanBeFailedByTheReaper() {
+        assertThat(CREATED.canTransitionTo(FAILED)).isTrue();
+        assertThat(INVENTORY_RESERVATION_PENDING.canTransitionTo(FAILED)).isTrue();
+        assertThat(INVENTORY_RESERVED.canTransitionTo(FAILED)).isTrue();
+        assertThat(PAYMENT_PENDING.canTransitionTo(FAILED)).isTrue();
+    }
+
+    /** Failing is for sagas that never completed; past PAID there is a real order to fulfil. */
+    @Test
+    void anOrderPastPaymentCannotBeFailed() {
+        assertThat(PAID.canTransitionTo(FAILED)).isFalse();
+        assertThat(SHIPMENT_CREATED.canTransitionTo(FAILED)).isFalse();
+        assertThat(OUT_FOR_DELIVERY.canTransitionTo(FAILED)).isFalse();
+    }
 }
