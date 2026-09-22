@@ -14,8 +14,7 @@ Every service already exposes, via Spring Boot Actuator:
 `CorrelationIdGlobalFilter` in api-gateway generates a `correlationId` (or forwards one
 already supplied by the client via an `X-Correlation-Id` header) and re-attaches it to
 every proxied backend call and to the response, so a client that didn't send one can
-still find it afterward. Each backend service's own `CorrelationIdFilter` reads that
-header, puts it in the SLF4J MDC for the duration of the request, and re-attaches it to
+still find it afterward. `CorrelationIdFilter` reads that header, puts it in the SLF4J MDC for the duration of the request, and re-attaches it to
 any outbound REST call (`ProductServiceClient`/`InventoryServiceClient`/
 `PaymentServiceClient` in order-service) or Kafka event the request triggers — every
 `EventEnvelope.correlationId` published now carries the request's actual id, read back
@@ -25,7 +24,15 @@ those events (`OrderSagaEventListener`, `OrderSagaStartListener`,
 correlation id back into the MDC for the duration of their handling, so consumer-side
 logs carry it too.
 
-Each backend `CorrelationIdFilter` runs at `Ordered.HIGHEST_PRECEDENCE + 2` — one step
+`CorrelationIdFilter` lives once in `platform-starter` since Phase 19
+([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)) — it was six
+byte-identical copies before — and is registered by auto-configuration in any servlet
+service that depends on the starter. api-gateway keeps its own reactive
+`CorrelationIdGlobalFilter`, which is genuinely different code rather than a seventh
+copy: a WebFlux request is not pinned to one thread, so an `MDC.put` there would not
+reliably still be visible by the time a later log statement runs.
+
+`CorrelationIdFilter` runs at `Ordered.HIGHEST_PRECEDENCE + 2` — one step
 after Spring Boot's own `ServerHttpObservationFilter` (registered at
 `HIGHEST_PRECEDENCE + 1`), so the request's tracing span already exists by the time the
 filter tags it (see Tracing below), and still well ahead of Spring Security, so
@@ -74,7 +81,7 @@ panel — the one genuinely business-specific panel, since a healthy JVM with a 
 saga is the failure mode that matters most here.
 
 **Outbox metrics (Phase 15).** Four meters per publishing service (order, inventory,
-payment, delivery — `OutboxMetrics`, see
+payment, delivery — `OutboxMetrics`, one copy in `platform-starter` since Phase 19, see
 [ADR 006](adr/006-outbox-concurrency-and-ordering.md)):
 
 | Metric | Type | Tags | What it says |
@@ -171,7 +178,7 @@ with no production traffic volume to worry about; the first thing to turn down i
 config were ever reused for a real deployment). `spring.application.name` (already set
 per-service) becomes each span's `service.name` resource attribute automatically.
 
-Each backend service's `CorrelationIdFilter` tags the current request's span with
+`CorrelationIdFilter` tags the current request's span with
 `correlationId` (via `Tracer.currentSpan().tag(...)`, resolved through an
 `ObjectProvider<Tracer>` so the filter doesn't require tracing to be present), so a trace
 in Tempo and the corresponding log lines can be cross-referenced by the same id.

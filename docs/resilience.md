@@ -114,7 +114,7 @@ an oversight, and the reason is different for the two call sites:
 - **product-service's call** (`ProductServiceClient`, from `OrderService.create`) is on
   the synchronous order-creation request path -- there's no Kafka retry safety net to
   fall back on here, so an open circuit has to become an honest HTTP response instead
-  of a fallback that pretends the call succeeded. `GlobalExceptionHandler` maps
+  of a fallback that pretends the call succeeded. order-service's `GlobalExceptionHandler` maps
   `CallNotPermittedException`/`BulkheadFullException`/`RequestNotPermitted` to `503
   Service Unavailable`, the same status `ProductServiceUnavailableException` already
   used for a direct connectivity failure -- both mean the same thing to the client:

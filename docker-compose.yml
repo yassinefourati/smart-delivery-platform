@@ -83,6 +83,13 @@ services:
       - smart-delivery-net
     restart: unless-stopped
 
+  # The only entry point clients are given, and since Phase 19 the only place API
+  # documentation is served: http://localhost:8080/swagger-ui.html aggregates every
+  # service's OpenAPI document into one UI with a service picker (docs/api-documentation.md).
+  #
+  # Each backend service pins its document's `servers` entry to PUBLIC_GATEWAY_URL, which
+  # defaults to http://localhost:8080 -- correct here, because that is where a browser on
+  # the host reaches this gateway. A real deployment behind a domain name sets it.
   api-gateway:
     <<: *service-defaults
     build:

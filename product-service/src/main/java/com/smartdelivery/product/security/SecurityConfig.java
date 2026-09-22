@@ -1,5 +1,7 @@
 package com.smartdelivery.product.security;
 
+import com.smartdelivery.platform.security.JwtAccessDeniedHandler;
+import com.smartdelivery.platform.security.JwtAuthenticationEntryPoint;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
@@ -21,6 +23,11 @@ public class SecurityConfig {
 
     private static final String[] PUBLIC_ENDPOINTS = {
             "/actuator/health", "/actuator/info", "/actuator/metrics",
+            // /v3/api-docs stays public: api-gateway fetches it unauthenticated to build
+            // the aggregated Swagger UI (docs/api-documentation.md). The /swagger-ui
+            // patterns stay listed because the UI is switched off by configuration, not
+            // by removing the dependency -- turning springdoc.swagger-ui.enabled back on
+            // for local debugging should not also require editing a security config.
             "/v3/api-docs/**", "/swagger-ui/**", "/swagger-ui.html"
     };
 

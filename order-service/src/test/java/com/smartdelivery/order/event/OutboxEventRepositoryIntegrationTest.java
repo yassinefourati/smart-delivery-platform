@@ -1,10 +1,15 @@
 package com.smartdelivery.order.event;
 
+import com.smartdelivery.platform.outbox.OutboxEvent;
+import com.smartdelivery.platform.outbox.OutboxEventRepository;
+import com.smartdelivery.platform.outbox.OutboxStatus;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.autoconfigure.orm.jpa.TestEntityManager;
+import org.springframework.boot.autoconfigure.domain.EntityScan;
+import org.springframework.data.jpa.repository.config.EnableJpaRepositories;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -27,8 +32,18 @@ import static org.assertj.core.api.Assertions.assertThat;
  * Deliberately a {@code @DataJpaTest} and not a {@code @SpringBootTest}: none of this
  * needs Kafka, a web layer, or the saga's REST clients, and the mapping it pins down is
  * the one thing a unit test with a mocked repository can say nothing at all about.
+ *
+ * <p>The entity and repository moved to {@code platform-starter} in Phase 19 (ADR 009),
+ * where a running application picks them up because
+ * {@code PlatformOutboxAutoConfiguration} appends that package to
+ * {@link org.springframework.boot.autoconfigure.AutoConfigurationPackages}. A slice test
+ * loads no auto-configuration beyond its own slice, so it has to name the package itself
+ * -- which is the honest thing for a slice to do, and why this is stated here rather
+ * than worked around by widening the test to a full context.
  */
 @DataJpaTest
+@EntityScan(basePackageClasses = OutboxEvent.class)
+@EnableJpaRepositories(basePackageClasses = OutboxEventRepository.class)
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
 @Testcontainers
 class OutboxEventRepositoryIntegrationTest {

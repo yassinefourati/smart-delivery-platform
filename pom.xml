@@ -13,6 +13,12 @@
     <description>Microservices-based smart logistics and delivery management platform</description>
 
     <modules>
+        <!--
+          First, because every service module depends on it (Phase 19, ADR 009). It holds
+          the infrastructure each service used to carry its own copy of; it holds nothing
+          domain-shaped, and the ADR says why that boundary is where it is.
+        -->
+        <module>platform-starter</module>
         <module>api-gateway</module>
         <module>user-service</module>
         <module>product-service</module>

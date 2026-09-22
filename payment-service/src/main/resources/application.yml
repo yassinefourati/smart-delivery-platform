@@ -96,9 +96,27 @@ outbox:
   cleanup-batch-size: ${OUTBOX_CLEANUP_BATCH_SIZE:500}
   cleanup-max-batches-per-run: ${OUTBOX_CLEANUP_MAX_BATCHES_PER_RUN:20}
 
+# This service still generates and serves its own OpenAPI document at /v3/api-docs --
+# that is what api-gateway proxies and aggregates. What it no longer serves is a Swagger
+# UI of its own: there is one UI for the whole platform, at the gateway, with a dropdown
+# to switch between services (docs/api-documentation.md). Six near-identical UIs on six
+# ports, each documenting an API you are not supposed to call directly, was six chances
+# to read a stale one. Set springdoc.swagger-ui.enabled=true to get it back for local
+# debugging against this service's own port.
 springdoc:
   swagger-ui:
-    path: /swagger-ui.html
+    enabled: false
+
+# Metadata springdoc cannot infer, bound by platform-starter (ADR 009). public-url is the
+# one that matters: it is what Swagger UI's "Try it out" calls, and it has to be the
+# gateway -- a document served through the gateway would otherwise advertise this
+# service's internal hostname, which resolves to nothing in a browser.
+platform:
+  openapi:
+    title: Payment Service API
+    description: Mock payment processing
+    version: v1
+    public-url: ${PUBLIC_GATEWAY_URL:http://localhost:8080}
 
 # correlationId (see CorrelationIdFilter) on every log line -- docs/observability.md.
 logging:

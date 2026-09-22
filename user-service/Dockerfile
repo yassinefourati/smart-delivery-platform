@@ -6,6 +6,7 @@ WORKDIR /workspace
 
 # Leverage Docker layer caching: resolve dependencies before copying full sources
 COPY pom.xml .
+COPY platform-starter/pom.xml platform-starter/pom.xml
 COPY api-gateway/pom.xml api-gateway/pom.xml
 COPY user-service/pom.xml user-service/pom.xml
 COPY product-service/pom.xml product-service/pom.xml
@@ -15,6 +16,7 @@ COPY payment-service/pom.xml payment-service/pom.xml
 COPY delivery-service/pom.xml delivery-service/pom.xml
 COPY notification-service/pom.xml notification-service/pom.xml
 
+COPY platform-starter/src platform-starter/src
 COPY user-service/src user-service/src
 RUN --mount=type=cache,target=/root/.m2 \
     mvn -B -pl user-service -am -DskipTests package

@@ -41,8 +41,8 @@ jobs:
         with:
           name: quality-reports
           path: |
-            '**/target/site/jacoco/**'
-            '**/target/spotbugsXml.xml'
+            **/target/site/jacoco/**
+            **/target/spotbugsXml.xml
           if-no-files-found: ignore
 
       - name: Publish test reports

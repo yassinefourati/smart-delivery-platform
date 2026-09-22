@@ -156,8 +156,12 @@ handle:
 ## Why the envelope is duplicated per service, not shared
 
 Every publishing/consuming service defines its own local `EventEnvelope` (and payload
-records) rather than importing one from a shared library -- consistent with this
-codebase having no shared domain module (see [architecture.md](architecture.md)). What
+records) rather than importing one from a shared library. Phase 19 introduced a shared
+`platform-starter` module and deliberately did **not** put these in it
+([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)): a shared events
+module makes the wire format a compile-time dependency, so a producer could not add a
+field without every consumer rebuilding -- which is the coupling asynchronous messaging
+exists to remove. The outbox *plumbing* moved; the *contracts* did not. What
 producer and consumer actually have to agree on is the JSON shape documented on this
 page, not a Java type. This matters concretely: Spring Kafka's default JSON
 (de)serialization support for generics adds a `__TypeId__` header naming the
@@ -173,7 +177,11 @@ instead of calling `KafkaTemplate.send()` directly -- order-service, inventory-s
 and payment-service since Phase 8; delivery-service used it from the day its first
 producer (`DeliveryEventPublisher`) was written, Phase 9, rather than repeating the
 direct-`send()` gap Phase 8 had just finished closing elsewhere. Each service has its
-own `outbox_events` table (`OutboxEvent`/`OutboxStatus`/`OutboxEventRepository`) and:
+own `outbox_events` table, created by its own Flyway migrations. Since Phase 19 the Java
+behind it (`OutboxEvent`/`OutboxStatus`/`OutboxEventRepository`/`OutboxPublisher`/
+`OutboxCleanupJob`) lives once in `platform-starter` and is wired in by
+auto-configuration; the table and its DDL stay per service, because each service owns its
+own database ([ADR 001](adr/001-database-per-service.md)). So:
 
 - `OrderEventPublisher`, `InventoryEventPublisher`, `PaymentEventPublisher`,
   `DeliveryEventPublisher` don't touch `KafkaTemplate` at all. Instead they build the

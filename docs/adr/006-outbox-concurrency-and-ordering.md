@@ -124,6 +124,12 @@ would turn a visible backlog into silent event loss.
   duplication, not the deliberate event-contract duplication ADR 002 argues for — the
   reasons that keep `EventEnvelope` per-service do not apply to a poller.
 
+  **Resolved in Phase 19.** All seven classes now live once in `platform-starter` and are
+  wired in by auto-configuration; the `outbox_event` table and its migrations stay per
+  service, since each service owns its own schema. See
+  [ADR 009](009-platform-starter-and-the-shared-code-boundary.md), which cites this
+  paragraph as the case that had outgrown the duplication argument.
+
 ## Alternatives considered
 
 - **A distributed lock (ShedLock, or a Postgres advisory lock) around the whole poll.**

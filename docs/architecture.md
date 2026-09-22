@@ -87,10 +87,17 @@ boundaries were chosen so that:
   [ADR 002](adr/002-kafka-for-events.md) and [saga.md](saga.md).
 - **No shared domain module.** A shared library of DTOs/entities used by every service
   looks convenient early on and becomes the thing that makes every deploy a
-  cross-team coordination problem. Services duplicate small amounts of boilerplate
-  (e.g. a standard error response shape) instead of sharing a JAR. The only thing
-  services share is the parent Maven POM, and that only manages dependency
-  **versions** — it contributes no code.
+  cross-team coordination problem. Event payloads and `EventEnvelope` stay duplicated
+  per service for exactly that reason ([ADR 002](adr/002-kafka-for-events.md)); so do
+  domain types, repositories, and each service's `SecurityFilterChain`.
+
+  Phase 19 drew the line explicitly rather than leaving it to habit. There is now one
+  shared module, `platform-starter`, and it holds **infrastructure only**: correlation
+  ids, the error contract, resource-server wiring, the transactional outbox, and OpenAPI
+  metadata — nearly 4,000 lines that had been copied service to service, and where
+  divergence is a bug rather than a design choice. Nothing domain-shaped may go in it.
+  [ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md) is the boundary,
+  including what is deliberately left duplicated and why.
 
 ## Request flow: synchronous vs. asynchronous
 

@@ -16,7 +16,7 @@ architecture. See [docs/architecture.md](docs/architecture.md) for the full pict
 
 | Service | Responsibility | Port |
 |---|---|---|
-| `api-gateway` | Edge routing, single entry point for clients | 8080 |
+| `api-gateway` | Edge routing, single entry point for clients, one aggregated Swagger UI | 8080 |
 | `user-service` | Registration, auth, profiles, addresses, roles | 8081 |
 | `product-service` | Product catalog, categories, search | 8082 |
 | `inventory-service` | Warehouse stock, reservation, deduction | 8083 |
@@ -25,10 +25,20 @@ architecture. See [docs/architecture.md](docs/architecture.md) for the full pict
 | `delivery-service` | Shipments, delivery agents, delivery status | 8086 |
 | `notification-service` | Kafka-driven customer notifications | 8087 |
 
+One more module is not a service: `platform-starter` is a library the six API services
+depend on, holding the cross-cutting infrastructure they used to each carry a copy of --
+correlation ids, the error contract, resource-server wiring, the transactional outbox,
+and OpenAPI metadata. It holds nothing domain-shaped, deliberately; see
+[ADR 009](docs/adr/009-platform-starter-and-the-shared-code-boundary.md) for the boundary
+and what is intentionally left duplicated.
+
 Each service owns its own PostgreSQL database, is independently buildable
 (`mvn -pl <service> -am package`), and communicates with the others only through REST
 APIs or Kafka events — never direct database access. See
 [docs/service-boundaries.md](docs/service-boundaries.md).
+
+API documentation for every service is browsable from one place once the stack is up:
+**<http://localhost:8080/swagger-ui.html>** ([docs/api-documentation.md](docs/api-documentation.md)).
 
 ## Tech stack
 
@@ -67,6 +77,7 @@ mvn clean install
 - [Kafka event catalog](docs/kafka-events.md)
 - [Database design](docs/database-design.md)
 - [Security](docs/security.md)
+- [API documentation (one Swagger UI, at the gateway)](docs/api-documentation.md)
 - [Observability](docs/observability.md)
 - [Testing](docs/testing.md)
 - [CI/CD](docs/ci-cd.md)
@@ -229,10 +240,10 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       being retried every two seconds forever; retries stay *unbounded*, since abandoning
       a row would silently drop an event whose business change is already committed. Five
       new metrics per service and five new Grafana panels make a stuck outbox visible for
-      the first time. The four implementations are byte-for-byte identical apart from
+      the first time. The four implementations were byte-for-byte identical apart from
       their package declaration -- infrastructure duplication, not the deliberate
       event-contract duplication of [ADR 002](docs/adr/002-kafka-for-events.md), and the
-      main argument for the shared platform starter Phase 19 weighs.
+      main argument for the shared platform starter Phase 19 weighed, and then built.
 - [x] **Phase 16 — Asymmetric JWT signing**: every service used to verify tokens with the
       same HMAC secret, which meant every service that could *verify* an ADMIN token could
       also *forge* one -- one compromised service, however unimportant, was enough to
@@ -327,6 +338,49 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       warehouse management only worked if you bypassed the front door. Both fixed, both
       covered. See [docs/ci-cd.md](docs/ci-cd.md) and
       [docs/testing.md](docs/testing.md#two-more-pre-existing-bugs-found-in-phase-18).
+- [x] **Phase 19 — A platform starter, and where the shared-code boundary sits**: eight
+      services built from the same template by copy-and-paste had accumulated nearly 4,000
+      lines of byte-identical infrastructure -- `CorrelationIdFilter` and `ErrorResponse` in
+      six copies, the JWT converter, entry point and access-denied handler in six, all seven
+      outbox classes in four, and an `OpenApiConfig` differing only in its title string in
+      six. The cost was never the typing; it was that a fix has to be applied *n* times with
+      nothing noticing when it is applied fewer. This platform had already paid that bill
+      twice -- the dead-letter suffix bug, and the Phase 15 outbox rewrite, a
+      correctness-critical `FOR UPDATE SKIP LOCKED` claim query that had to land identically
+      in four services. [ADR 006](docs/adr/006-outbox-concurrency-and-ordering.md) said so at
+      the time. A new `platform-starter` module now holds that infrastructure once, wired in
+      by Spring Boot **auto-configuration** rather than a base class or a component scan:
+      every bean is `@ConditionalOnMissingBean` so a service can always take the wheel back,
+      every dependency is `<optional>`, and every auto-configuration is `@ConditionalOnClass`
+      -- so api-gateway (reactive, its own correlation filter) and notification-service (no
+      database, no outbox) depend on none of it, which is a sign the boundary is roughly
+      right rather than a sign it failed. What deliberately did **not** move is the more
+      important half, and [ADR 009](docs/adr/009-platform-starter-and-the-shared-code-boundary.md)
+      spends more words on it: event payloads and `EventEnvelope` stay duplicated per service
+      ([ADR 002](docs/adr/002-kafka-for-events.md)), because a shared events module makes the
+      wire format a compile-time dependency and turns a microservices platform into a
+      distributed monolith; so do each service's `SecurityFilterChain` (the *wiring* is
+      shared, the *policy* is not), its domain exceptions, and its Flyway migrations --
+      `outbox_events`'s DDL included, since each service owns its own schema.
+      Errors moved to RFC 7807 `ProblemDetail`, **additively**: the body now carries `type`,
+      `title`, `detail` and `instance` alongside the five fields clients have read since
+      Phase 2, with the same names and values, so nothing that parsed the old shape has to
+      change -- the same "add fields, never rename or remove" rule the event payloads follow,
+      with a test that fails if someone later "tidies up" by dropping them. Consolidating the
+      handler surfaced a real pre-existing defect: malformed JSON, an unparseable path
+      variable, and a request to a nonexistent path all fell through to the catch-all and
+      came back as **500s**, telling a caller who sent bad input that the server had failed.
+      Fixed in the one place that decision is now made. 401s and 403s also stopped minting a
+      random `correlationId` -- they are produced inside the security filter chain and had
+      been ignoring the request's actual id, so the one field whose job is to join a client's
+      report to a log line matched nothing on exactly the responses people most often ask
+      about. **API documentation is now one Swagger UI at the gateway**
+      ([docs/api-documentation.md](docs/api-documentation.md)) with a dropdown to switch
+      between services: each service still generates its own document, the gateway proxies
+      and aggregates them, and the per-service UIs are switched off. The detail that makes it
+      work rather than merely exist is the `servers` entry -- left to itself springdoc would
+      advertise `http://order-service:8084`, a hostname that resolves to nothing in a
+      browser, so every "Try it out" would fail from a UI that looked perfectly fine.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

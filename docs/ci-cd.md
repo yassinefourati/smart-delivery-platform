@@ -4,7 +4,7 @@
 
 ## Jobs
 
-- **`build-and-test`** — `mvn -B clean verify` across the whole 8-module reactor: every
+- **`build-and-test`** — `mvn -B clean verify` across the whole 9-module reactor (8 services plus `platform-starter`): every
   unit test and every Testcontainers integration test (see
   [docs/testing.md](testing.md)) runs here, since GitHub Actions runners have Docker
   available (unlike the sandbox this platform was built in). Since Phase 18 the same
@@ -57,21 +57,41 @@ container-backed integration tests) was run once, the resulting per-module line 
 read off the JaCoCo report, and each module's floor set to that number rounded **down**
 to the nearest whole percent:
 
-| Module | Measured line coverage | Enforced floor |
-|---|---|---|
-| api-gateway | 87.50% | 0.87 |
-| user-service | 92.74% | 0.92 |
-| product-service | 91.16% | 0.91 |
-| inventory-service | 91.86% | 0.91 |
-| order-service | 90.65% | 0.90 |
-| payment-service | 89.44% | 0.89 |
-| delivery-service | 87.09% | 0.87 |
-| notification-service | 96.81% | 0.96 |
+| Module | Measured line coverage | Enforced floor | Was (Phase 18) |
+|---|---|---|---|
+| platform-starter | 95.18% | 0.95 | — (new in Phase 19) |
+| api-gateway | 87.50% | 0.87 | 0.87 |
+| user-service | 94.90% | 0.94 | 0.92 |
+| product-service | 92.17% | 0.92 | 0.91 |
+| inventory-service | 91.30% | 0.91 | 0.91 |
+| order-service | 89.51% | 0.89 | 0.90 |
+| payment-service | 87.72% | 0.87 | 0.89 |
+| delivery-service | 86.04% | 0.86 | 0.87 |
+| notification-service | 96.81% | 0.96 | 0.96 |
 
 So the gate's job is not "reach 80%" — it is **"do not go backwards"**. A change that
 adds untested code fails the module it landed in; a change that adds tests raises the
 headroom and nothing else. The floors are worth re-measuring and raising when a phase
 meaningfully improves coverage; they should never be lowered to make a build pass.
+
+### Why three floors went down in Phase 19
+
+order-, payment- and delivery-service each dropped about one point, which looks exactly
+like the thing the paragraph above forbids. It is worth being explicit that it is not.
+
+Phase 19 moved roughly 4,000 lines of shared infrastructure out of the service modules
+and into `platform-starter` ([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)).
+The outbox classes in particular were among the best-covered code those modules had —
+unit-tested *and* driven by container-backed integration tests — so removing them lowered
+the average of what stayed, in the same way removing the top three marks lowers a class
+average without anyone having done worse. Nothing became less tested: that code now sits
+in `platform-starter` at **95.18%**, higher than any module it left, and platform-wide
+line coverage across all nine modules is **91.18%** (2,130 of 2,336 lines).
+
+The distinction that matters, and the rule to apply next time: a floor may be re-measured
+downward when **the module's contents changed** — code moved out, or a module was split —
+and never when the same code simply became less tested. The check is whether the covered
+lines went somewhere, not whether the percentage moved.
 
 One caveat worth stating plainly: these numbers include the Testcontainers tests, so
 they can only be met on a machine with Docker. Running `mvn verify` with the container
@@ -118,11 +138,17 @@ the codebase already follows so it keeps following it:
   is how transaction boundaries and business rules quietly stop being enforced;
 - **domain classes never depend on web/DTO classes** — the dependency runs inwards, so a
   DTO change can't ripple into the domain model;
-- **only the `event` package touches `KafkaTemplate`** — this is the rule that protects
-  the outbox ([ADR 004](adr/004-outbox-pattern.md)): a service class publishing directly
-  to Kafka is exactly the dual-write the outbox exists to prevent. The `config` package is
+- **only the `event` package touches Kafka at all** — this is the rule that protects the
+  outbox ([ADR 004](adr/004-outbox-pattern.md)): a service class publishing directly to
+  Kafka is exactly the dual-write the outbox exists to prevent. The `config` package is
   exempt because `KafkaConsumerConfig` legitimately hands a `KafkaTemplate` to Spring's
-  `DeadLetterPublishingRecoverer`.
+  `DeadLetterPublishingRecoverer`;
+- **nothing outside `config` holds a `KafkaTemplate` at all** (added in Phase 19). Once the
+  outbox poller moved to `platform-starter`
+  ([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)), not even the
+  `event` package had a reason to hold one — it writes rows now. A rule that can be
+  tightened after a refactor is worth tightening; leaving it at the old boundary would
+  quietly permit exactly the thing the refactor removed.
 
 notification-service gets a **different** set of rules rather than the shared four,
 because it genuinely has no web, domain, repository, or service packages — it is a pure
@@ -222,7 +248,7 @@ deployment that doesn't set them gets no seeded account at all.
 ## Dependency updates
 
 `.github/dependabot.yml` — weekly PRs for the Maven reactor (one entry at the repo root
-covers all 8 modules' `dependencyManagement`), the 8 services' Dockerfile base images
+covers all 9 modules' `dependencyManagement`), the 8 services' Dockerfile base images
 (one entry per Dockerfile, since Dependabot's Docker ecosystem doesn't follow images
 transitively across files), and the GitHub Actions used in `ci.yml` itself.
 

@@ -41,8 +41,84 @@ spring:
               predicates:
                 - Path=/api/v1/agents/**,/api/v1/shipments/**,/api/v1/deliveries/**
 
+            # --- Aggregated API documentation (docs/api-documentation.md) ---------------
+            # One route per service, each rewriting /v3/api-docs/<service> to that
+            # service's own /v3/api-docs. The single Swagger UI below lists them all, so a
+            # reader browses the whole platform's API from one page and one origin -- and
+            # never has to know, or be able to reach, a service's own port.
+            #
+            # These are EXACT paths, not /v3/api-docs/**, and that is deliberate: Swagger
+            # UI fetches its own settings from /v3/api-docs/swagger-config, which springdoc
+            # serves from the gateway itself. A wildcard here would swallow that request
+            # and route it to user-service, and the UI would come up empty with nothing in
+            # the log to say why.
+            - id: user-service-api-docs
+              uri: ${USER_SERVICE_URI:http://localhost:8081}
+              predicates:
+                - Path=/v3/api-docs/user-service
+              filters:
+                - SetPath=/v3/api-docs
+            - id: product-service-api-docs
+              uri: ${PRODUCT_SERVICE_URI:http://localhost:8082}
+              predicates:
+                - Path=/v3/api-docs/product-service
+              filters:
+                - SetPath=/v3/api-docs
+            - id: inventory-service-api-docs
+              uri: ${INVENTORY_SERVICE_URI:http://localhost:8083}
+              predicates:
+                - Path=/v3/api-docs/inventory-service
+              filters:
+                - SetPath=/v3/api-docs
+            - id: order-service-api-docs
+              uri: ${ORDER_SERVICE_URI:http://localhost:8084}
+              predicates:
+                - Path=/v3/api-docs/order-service
+              filters:
+                - SetPath=/v3/api-docs
+            - id: payment-service-api-docs
+              uri: ${PAYMENT_SERVICE_URI:http://localhost:8085}
+              predicates:
+                - Path=/v3/api-docs/payment-service
+              filters:
+                - SetPath=/v3/api-docs
+            - id: delivery-service-api-docs
+              uri: ${DELIVERY_SERVICE_URI:http://localhost:8086}
+              predicates:
+                - Path=/v3/api-docs/delivery-service
+              filters:
+                - SetPath=/v3/api-docs
+
 server:
   port: 8080
+
+# One Swagger UI for the whole platform, at http://localhost:8080/swagger-ui.html, with a
+# dropdown to switch between services -- see docs/api-documentation.md. Each service still
+# generates its own document; this only collects them, which keeps the aggregation honest
+# (nothing is hand-maintained here that could drift from a service's real API).
+#
+# The urls are relative, so the browser fetches them from the gateway's own origin and
+# there is no CORS configuration to get wrong. Each resolves to a route above.
+springdoc:
+  swagger-ui:
+    path: /swagger-ui.html
+    # springdoc sorts the dropdown alphabetically whatever order these are written in,
+    # so the entry point is named explicitly instead: user-service is where a reader has
+    # to start, because everything else needs a token from it.
+    urls-primary-name: user-service
+    urls:
+      - name: user-service
+        url: /v3/api-docs/user-service
+      - name: product-service
+        url: /v3/api-docs/product-service
+      - name: inventory-service
+        url: /v3/api-docs/inventory-service
+      - name: order-service
+        url: /v3/api-docs/order-service
+      - name: payment-service
+        url: /v3/api-docs/payment-service
+      - name: delivery-service
+        url: /v3/api-docs/delivery-service
 
 management:
   endpoints:

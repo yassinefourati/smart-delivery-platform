@@ -2,7 +2,8 @@
 
 ## Strategy
 
-Two layers, consistently across all 8 services:
+Two layers, consistently across all 8 services (and `platform-starter`, the shared
+infrastructure module added in Phase 19):
 
 - **Unit tests** — service/domain logic with Mockito-mocked collaborators. Fast, no
   infrastructure, run everywhere including this sandbox.
@@ -77,14 +78,28 @@ Because it needs no Postgres/Kafka container, this is one of only two integratio
 tests in the whole platform (`ResilienceIntegrationTest` is the other) that actually
 runs to completion in this sandbox — see the Docker caveat below.
 
+## platform-starter's tests (Phase 19)
+
+The shared infrastructure module ([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md))
+carries the tests that used to be duplicated alongside the code, plus new ones for the
+things only a shared module can get wrong:
+
+| Test | What it pins |
+|---|---|
+| `OutboxEventTest`, `OutboxPublisherTest`, `OutboxCleanupJobTest` | Moved here from order-service; the other three services' identical copies were deleted. The domain literals ("Order", `ORDER_CREATED`) became generic, since the poller never reads them. |
+| `ApiErrorsTest` | **The compatibility guarantee, as a test rather than a promise**: the RFC 7807 body is a strict superset of the `ErrorResponse` record it replaced. If someone later "tidies up" by dropping the duplicated extension properties in favour of RFC 7807's own members, this fails -- which is the point, because that is a breaking change for every existing client. |
+| `PlatformExceptionHandlerTest` | The shared mappings, driven through a real MVC dispatch rather than by calling the handler methods. Most of these exceptions are thrown by Spring during argument binding, so invoking the methods directly would prove the mapping exists without proving anything reaches it. Includes the three cases that used to be 500s, and the subclass-wins-over-catch-all extension point every service relies on. |
+| `PlatformAutoConfigurationTest` | The **conditions**, not the classes. Everything the starter contributes arrives through an auto-configuration, so "is it wired where it should be and absent where it should not be" is a different question from "does the class work" -- and it is the one that decides whether adding this dependency to a service is safe. It asserts the correlation filter is absent outside a servlet application (api-gateway is reactive), that the outbox appears only with both a Kafka client and a persistence unit, that `platform.outbox.enabled=false` switches it off, and that a service can replace any bean with its own. |
+
 ## Where the outbox's container-backed tests live (Phase 15)
 
 `OutboxEvent`, `OutboxEventRepository`, `OutboxPublisher`, `OutboxCleanupJob`,
-`OutboxProperties`, and `OutboxMetrics` are byte-for-byte identical in order-,
+`OutboxProperties`, and `OutboxMetrics` used to be byte-for-byte identical in order-,
 inventory-, payment-, and delivery-service apart from their package declaration
-([ADR 006](adr/006-outbox-concurrency-and-ordering.md)). All four carry the full unit
-test suite (`OutboxPublisherTest`, `OutboxEventTest`, `OutboxCleanupJobTest`); only
-order-service carries the three container-backed ones.
+([ADR 006](adr/006-outbox-concurrency-and-ordering.md)). Phase 19 moved all seven into
+`platform-starter` and deleted the copies, so the unit suite (`OutboxPublisherTest`,
+`OutboxEventTest`, `OutboxCleanupJobTest`) now exists once, there. Only order-service
+carries the three container-backed ones.
 
 That is deliberate. Running four copies of "two publishers race one table" costs four
 Postgres and Kafka containers per CI run to prove the same code four times. What *is*
@@ -169,7 +184,8 @@ classes:
 | `controllersDoNotTouchRepositoriesDirectly` | Transaction boundaries and business rules live in the service layer; a controller reaching past it is how they stop being applied. |
 | `domainDoesNotDependOnTheWebLayer` | Dependencies point inwards. A DTO or a `@RestController` changing must not be able to ripple into the domain model. |
 | `businessCodeDoesNotPublishToKafkaDirectly` | The outbox ([ADR 004](adr/004-outbox-pattern.md)) only works if *nothing* writes to Kafka outside it. A service class holding a `KafkaTemplate` is precisely the dual-write the outbox exists to eliminate. |
-| `onlyTheEventAndConfigPackagesTouchKafka` | The same rule from the other direction, stated as an allowlist so a new package can't quietly acquire a `KafkaTemplate`. `config` is allowed because `KafkaConsumerConfig` has to hand one to `DeadLetterPublishingRecoverer`. |
+| `onlyTheEventAndConfigPackagesTouchKafka` | The same rule from the other direction, stated as an allowlist so a new package can't quietly acquire a Kafka dependency. `config` is allowed because `KafkaConsumerConfig` has to hand a `KafkaTemplate` to `DeadLetterPublishingRecoverer`. |
+| `nothingOutsideTheDeadLetterWiringHoldsAKafkaTemplate` (Phase 19) | Sharper than the two above, and only possible once the outbox poller moved to `platform-starter`: *nothing* in a service holds a `KafkaTemplate` now, not even the `event` package, which writes rows. Stated as its own rule rather than by tightening the others, because the three fail for different reasons and the message matters when one does. |
 
 **notification-service gets different rules on purpose.** It has no web, domain,
 repository, or service packages at all — it is a pure consumer

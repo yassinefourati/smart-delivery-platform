@@ -40,6 +40,17 @@ docker compose ps
 curl http://localhost:8080/actuator/health
 ```
 
+Once the stack is up, every service's API is browsable from one page:
+**<http://localhost:8080/swagger-ui.html>**, with a dropdown to switch between services
+(see [api-documentation.md](api-documentation.md)). The individual services no longer
+serve a Swagger UI of their own; set `springdoc.swagger-ui.enabled=true` on one if you
+want it back while debugging against its own port.
+
+`scripts/e2e-smoke.sh` drives a complete customer journey against this stack through the
+gateway -- register, stock a product, place an order, follow it to `PAID`, oversell,
+cancel and refund. `SKIP_BUILD=1` reuses already-built images and `KEEP_STACK=1` leaves
+the stack up afterwards.
+
 Tear down with `docker compose down` (add `-v` to also drop the Postgres/Redis data
 volumes).
 

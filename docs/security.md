@@ -170,32 +170,87 @@ such a token any more.
 
 ## HTTP status codes
 
-Consistent mapping, enforced by a global exception handler per service (each service
-defines one; it is a few dozen lines, deliberately not shared as a library — see
-[architecture.md](architecture.md#why-microservices-and-why-these-boundaries)):
+Consistent mapping, enforced by each service's `GlobalExceptionHandler`. Since Phase 19
+([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)) those handlers
+extend `PlatformExceptionHandler` from `platform-starter`, which owns the mappings every
+service shares; each service keeps only its own domain exceptions. The *policy* stayed
+where it was — what is shared is the mechanism.
 
-| Situation | Status |
-|---|---|
-| Validation failure | `400 Bad Request` |
-| No/invalid JWT | `401 Unauthorized` |
-| Valid JWT, insufficient role/ownership | `403 Forbidden` |
-| Resource doesn't exist | `404 Not Found` |
-| State conflict (e.g. duplicate idempotency key with different body, optimistic lock loss) | `409 Conflict` |
-| Unhandled server error | `500 Internal Server Error`, **no stack trace in the body** |
+| Situation | Status | Error code |
+|---|---|---|
+| Validation failure | `400 Bad Request` | `VALIDATION_ERROR` |
+| Malformed or missing JSON body | `400 Bad Request` | `MALFORMED_REQUEST` |
+| No/invalid JWT | `401 Unauthorized` | `UNAUTHORIZED` |
+| Valid JWT, insufficient role/ownership | `403 Forbidden` | `FORBIDDEN` |
+| Resource doesn't exist | `404 Not Found` | `NOT_FOUND` |
+| No such endpoint | `404 Not Found` | `NOT_FOUND` |
+| Wrong HTTP method for the path | `405 Method Not Allowed` | `METHOD_NOT_ALLOWED` |
+| State conflict (duplicate idempotency key with a different body, optimistic lock loss, an illegal state transition) | `409 Conflict` | `CONFLICT`, `CONCURRENT_MODIFICATION` |
+| A downstream service is unavailable or was not called | `503 Service Unavailable` | `SERVICE_UNAVAILABLE` |
+| Unhandled server error | `500 Internal Server Error`, **no stack trace in the body** | `INTERNAL_ERROR` |
 
-Every error response follows the shape defined in the master engineering brief section
-19:
+Three of these are new in Phase 19, and all three were previously `500`s: malformed JSON,
+an unparseable path variable, and a request to a path with no handler all fell through to
+the catch-all. That was a real defect — a caller who sent bad JSON was told the *server*
+had failed — and it is fixed in the one place that decision is now made.
+
+### Error responses
+
+Every error body is an RFC 7807 problem detail, served as `application/problem+json`:
 
 ```json
 {
-  "timestamp": "2026-08-11T12:00:00Z",
+  "type": "https://github.com/yassinefourati/smart-delivery-platform/blob/main/docs/security.md#error-codes",
+  "title": "VALIDATION_ERROR",
   "status": 400,
+  "detail": "quantity: must be greater than 0",
+  "instance": "/api/v1/orders",
+  "timestamp": "2026-08-11T12:00:00Z",
   "error": "VALIDATION_ERROR",
-  "message": "Request validation failed",
+  "message": "quantity: must be greater than 0",
   "path": "/api/v1/orders",
   "correlationId": "5b1a7e2e-9c3d-4a2b-8f1e-2d6c9a0b1234"
 }
 ```
+
+The last five fields are the pre-Phase-19 body, unchanged, kept as RFC 7807 extension
+properties. `status` means the same thing in both and appears once. **Nothing that parsed
+the old shape has to change**: the new body is a strict superset, which is the same
+"add fields, never rename or remove" rule the event payloads follow
+([kafka-events.md](kafka-events.md)). Dropping the duplicated properties in favour of
+RFC 7807's own members would be a breaking change and needs announcing as one; there is a
+test in `platform-starter` that fails if someone tries.
+
+The one thing that did change on the wire is the media type. `application/problem+json`
+is what makes the response self-describing, it is still JSON to any parser, and it is the
+reason to adopt RFC 7807 at all.
+
+`correlationId` is now taken from the request's correlation id on **every** response
+including 401s and 403s. Those two are produced inside the security filter chain, before
+Spring MVC dispatch, so they cannot go through the `@RestControllerAdvice` and used to
+mint a random id instead — which meant the one field whose job is to join a client's
+report to a log line matched nothing, on exactly the responses people most often ask
+about.
+
+### Error codes
+
+`error` (and RFC 7807's `title`) is one of the following. It is stable and safe to branch
+on; `message` is for humans and may be reworded.
+
+| Code | Status | Raised by |
+|---|---|---|
+| `VALIDATION_ERROR` | 400 | shared — bean validation, or an unparseable path variable |
+| `MALFORMED_REQUEST` | 400 | shared — the body is missing or is not valid JSON |
+| `INVALID_PRODUCT` | 400 | order-service — the order names a product that does not exist |
+| `UNAUTHORIZED` | 401 | shared, plus user-service's bad credentials / unknown service client |
+| `FORBIDDEN` | 403 | shared |
+| `NOT_FOUND` | 404 | every service, for its own aggregates; shared, for a path with no handler |
+| `METHOD_NOT_ALLOWED` | 405 | shared |
+| `CONFLICT` | 409 | product, inventory, order, delivery, payment — a duplicate or an illegal state transition |
+| `EMAIL_ALREADY_EXISTS` | 409 | user-service |
+| `CONCURRENT_MODIFICATION` | 409 | inventory, order — an optimistic-lock loss; the caller should retry |
+| `SERVICE_UNAVAILABLE` | 503 | order-service — a downstream service is down, or Resilience4j refused the call |
+| `INTERNAL_ERROR` | 500 | shared — the catch-all |
 
 ## Deliberately out of scope (follow-ups)
 

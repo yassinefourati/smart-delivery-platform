@@ -6,6 +6,7 @@ WORKDIR /workspace
 
 # Leverage Docker layer caching: resolve dependencies before copying full sources
 COPY pom.xml .
+COPY platform-starter/pom.xml platform-starter/pom.xml
 COPY api-gateway/pom.xml api-gateway/pom.xml
 COPY user-service/pom.xml user-service/pom.xml
 COPY product-service/pom.xml product-service/pom.xml
