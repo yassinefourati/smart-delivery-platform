@@ -147,7 +147,108 @@ default of 1 partition, 1 listener thread. "After" is this phase, with productio
 values: pool 10, 6 partitions created by the services themselves, 3 listener threads.
 Every run used the same parameters on both sides.
 
-RESULTS_PLACEHOLDER
+### A: product-service slow (+1.5s)
+
+`PROFILE=load RATE=0.5 HOLD=2m ORDER_RATIO=0.3 USERS=20`: 10 iterations/s, 3 of them orders.
+
+| | Before | After: fix only (pool 4, 1 thread) | After: all fixes (pool 10, 3 threads) |
+|---|---|---|---|
+| Failed requests | **4.66%** (98 × 503) | 0 | 0 |
+| Orders rejected | **49 of 536** (503) | 0 of 669 | 0 of 689 |
+| Status reads failed | **49 of 445**; p95 **2.0s**, which is the pool timeout | 0; p95 15ms | 0; p95 17ms |
+| Create p95 | 3.44s | 1.55s | 1.55s |
+| Sagas completed | 40 of 42; p95 27.6s | 148 of 148; p95 4.1s | 179 of 179; p95 3.7s |
+| Catalog p95 | 16ms | 20ms | 23ms |
+
+Before the fix, every in-flight create held one of order-service's four connections for
+1.5s or more. Anything else that needed the database waited for one, and gave up after
+2s:
+- **status reads**, which never call product-service, failed at exactly the pool
+  timeout;
+- **creates** were rejected before they got a connection;
+- **the saga's own listeners**, which run in the same pool, fell behind, so accepted
+  orders took half a minute to be paid, and two never were.
+
+The catalog was unaffected, since it's another service with another pool.
+
+After the fix, a slow product-service makes placing an order slow, which is honest: the
+order can't be priced any faster than product-service answers. Nothing else in
+order-service notices. **The fix alone accounts for the difference.** The middle column
+keeps the old pool of 4 and one listener thread, and it's as clean as the right-hand
+one. A bigger pool would only have raised the traffic level at which the failure starts.
+
+The create-order threshold (p95 < 800ms) fails in both "after" columns, correctly. The
+suite reports what a customer would see, and a customer would see 1.5s.
+
+### B: healthy stack, stress profile
+
+`PROFILE=stress RATE=0.25 USERS=30`: 5 → 13 → 25 → 50 iterations/s in 3-minute steps,
+then 1/s, with 20% of iterations placing an order.
+
+| | Before | After (pool 10, 6 partitions, 3 threads) |
+|---|---|---|
+| Requests (failed) | 24,432 (0) | 24,268 (0) |
+| p95 catalog / create / status | 7 / 17 / 5 ms | 7 / 17 / 5 ms |
+| Sagas completed | 835 of 835; p95 2.05s | 834 of 834; p95 2.04s |
+
+The healthy path neither regressed nor improved, which is what this experiment was for:
+none of the changes should cost anything when nothing is slow. Neither version reached a
+limit at 50 iterations/s. The breaking point of a healthy stack is above what this
+sandbox can generate and serve at the same time. Finding it needs a separate k6 machine
+and a real cluster.
+
+The saga's ~2s floor is the outbox: `order.created` waits for the next poll, which runs
+every 2s (`OUTBOX_POLL_INTERVAL_MS`). The saga itself takes milliseconds.
+
+### C: inventory-service slow (+200ms per call)
+
+`PROFILE=load RATE=0.3 HOLD=2m ORDER_RATIO=0.8 USERS=20`: 6 iterations/s, about 4.8 of
+them orders.
+
+| | Before (1 partition, 1 thread) | After: 6 partitions, 3 threads | After: 6 partitions, 6 threads |
+|---|---|---|---|
+| HTTP failures | 0 | 0 | 0 |
+| Sagas completed within a minute | **12 of 16** | 47 of 47 | 155 of 155 |
+| Saga p95 | **45.5s** | 27.9s | **4.3s** |
+| Orders stuck at the end (CREATED / PAID) | 114 / 208 | 35 / 2 | 0 / 2 |
+
+This experiment shows a failure that HTTP can't see. Every request succeeded, and every
+order was accepted in under 30ms, yet a quarter of them hadn't been paid a minute later.
+
+`startSaga` runs on the consumer thread that took `order.created`. It makes an
+inventory reserve call, the charge, and an inventory deduct call. With +200ms per
+inventory call, that is about 0.45s of thread time per order. So saga throughput is
+**threads ÷ 0.45s**:
+
+| Consumer threads | Capacity | Against 4.8 orders/s arriving |
+|---|---|---|
+| 1 (before) | about 2 sagas/s | The backlog grows without bound. |
+| 3 | about 6.5 sagas/s | It keeps up, but just barely, so orders queue. |
+| 6 | about 13 sagas/s | There is no queue. |
+
+The `PAID` column is the same effect one hop later: delivery-service consumes
+`payment.completed` with the same single thread. The last column is production's
+consumer count on one pod: 2 pods × 3 threads, one per partition.
+
+**Nothing was stranded by the extra partitions.** The state machine skips an event
+that arrives out of order, and that would leave an order stuck mid-saga. After each run
+every order was at `SHIPMENT_CREATED` except the two or three still in flight. That is
+what keying by order id predicts, since all of one order's events share a partition. It
+isn't a proof, though. The ordering guarantee itself is the outbox's
+([ADR 006](adr/006-outbox-concurrency-and-ordering.md)).
+
+### How these runs were produced
+
+- The stack was run with plain `java -jar`. Each "after" run started on fresh databases,
+  with `DB_POOL_MAX`, `KAFKA_TOPICS_CREATE`, `KAFKA_TOPICS_PARTITIONS` and
+  `KAFKA_LISTENER_CONCURRENCY` set as in the table headers.
+- Before the first "after" run, `order.created` was created by hand with **one**
+  partition. order-service raised it to 6 at startup (`KafkaAdmin`: "exists but has a
+  different partition count: 1 not 6, increasing").
+- The latency proxy is about 20 lines of asyncio. It delays each chunk sent towards the
+  dependency by a value read from a file, so a run could change the latency without a
+  restart. It is not in the repository. Toxiproxy does the same job properly and is the
+  tool to use in a shared environment.
 
 ## What this does not cover
 

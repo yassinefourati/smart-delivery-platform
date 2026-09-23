@@ -82,8 +82,9 @@ spring:
       # Consumer threads per listener in this pod (Phase 23, ADR 015). A group gets at most
       # one active consumer per partition, so pods x concurrency above the topic's partition
       # count (kafka.topics.partitions) only adds idle threads. 1 here, raised by Compose and
-      # the Helm chart; each thread is a Kafka consumer and, while it handles a record, a
-      # database connection -- keep it within database.poolMax.
+      # the Helm chart. A thread takes a database connection only for the short transaction
+      # a record needs, never while it waits on the network, so threads need not fit the
+      # pool one-for-one; SdpDbPoolSaturated says when they stop fitting.
       concurrency: ${KAFKA_LISTENER_CONCURRENCY:1}
 
 server:

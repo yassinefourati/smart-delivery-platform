@@ -58,7 +58,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
  * connections per pod, so a slow product-service pinned all of them, and everything
  * else in order-service that needs the database failed with a 503 after the pool's
  * connection timeout: status reads, the saga's Kafka listeners, the outbox. A load
- * test with 1.5s of injected product latency measured it: 12% of status reads failed
+ * test with 1.5s of injected product latency measured it: 11% of status reads failed
  * at exactly the pool timeout (docs/load-testing.md).
  *
  * The test makes the failure deterministic instead of statistical: ONE pooled

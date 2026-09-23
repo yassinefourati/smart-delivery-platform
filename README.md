@@ -537,7 +537,24 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       that follows orders through the saga;
     - a manually triggered `Load test` workflow.
 
-  README_PHASE23_RESULTS
+  **Measured before and after** on the same 4-core sandbox, with latency injected by a
+  TCP proxy:
+  - **product-service 1.5s slow:**
+    - failed requests went from 4.66% to 0;
+    - status-read p95 went from 2.0s (the pool timeout) to 17ms;
+    - sagas completed went from 40/42 to 179/179.
+
+    The in-transaction fix alone, on the old pool of 4, did the same.
+  - **inventory-service 200ms slow:** every HTTP request succeeded in both versions, but
+    saga p95 went from 45.5s, with a quarter of the probe's orders unpaid after a
+    minute, to 4.3s at production's consumer count.
+  - **Healthy stress run up to 50 iterations/s:** 0 failures, and identical latencies
+    before and after.
+
+  These numbers compare one version with the other; they are not a statement of
+  production capacity. The runs used one pod per service, a shared Postgres, k6 on the
+  same machine, and no replication. The next open item is a rate limit on login: BCrypt,
+  with nothing limiting it.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

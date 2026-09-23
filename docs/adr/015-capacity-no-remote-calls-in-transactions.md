@@ -21,10 +21,12 @@ one ([docs/load-testing.md](../load-testing.md)).
    path in the service, all failing with 503 at the 2-second pool timeout, including paths
    that never call product-service.
 
-   With 1.5s of latency injected in front of product-service, at 10 requests/s:
-   - 12% of order-status reads failed, with p95 at exactly 2.0s, the pool timeout;
-   - 10% of order creates were rejected;
-   - the saga's p95 time to PAID went from 2.6s to 27.6s;
+   With 1.5s of latency injected in front of product-service, at 10 iterations/s (30%
+   of them orders):
+   - 11% of order-status reads failed (49 of 445), with p95 at exactly 2.0s, the pool
+     timeout;
+   - 9% of order creates were rejected with 503 (49 of 536);
+   - the saga's p95 time to PAID went from 2.6s (nothing injected) to 27.6s;
    - 5% of sagas never finished within a minute.
 2. **Pools sized for a topology that no longer existed.** `poolMax: 4` was chosen so that
    all six databases on ONE Postgres instance fit a stock `max_connections` of 100. Phase
@@ -36,6 +38,10 @@ one ([docs/load-testing.md](../load-testing.md)).
    brokers). Listener concurrency was Spring's default of 1. A consumer group can never
    have more active consumers than partitions, so every saga step ran through one thread
    per topic, platform-wide, however many pods were running.
+
+   With 200ms injected in front of inventory-service, every HTTP request succeeded, but
+   4 of 16 probe orders weren't paid within a minute, and the saga's p95 was 45.5s. The
+   saga was processing orders more slowly than they arrived.
 
    The dead-letter resolvers had a matching trap. They published to the **same partition
    number** on the `.DLT` topic, which only works while the DLT has at least as many
@@ -83,6 +89,17 @@ one ([docs/load-testing.md](../load-testing.md)).
      against Compose.
 
 ## Consequences
+
+- **Measured** ([load-testing.md](../load-testing.md#what-phase-23-found)):
+  - With product-service slow:
+    - failed requests went from 4.66% to 0;
+    - status-read p95 went from 2.0s to 17ms;
+    - sagas completed went from 40 of 42 to 179 of 179.
+
+    The in-transaction fix alone, on the old pool of 4, gave the same result.
+  - With inventory-service slow, saga p95 went from 45.5s to 4.3s at production's
+    consumer count (6 per group).
+  - The healthy stress run was identical before and after.
 
 - **A slow product-service now makes order placement slow, not order-service unavailable.**
   Status reads, the saga and the outbox keep their connections. Creates are bounded by the
