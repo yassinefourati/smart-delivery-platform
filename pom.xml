@@ -54,10 +54,58 @@
           aggregator) cannot fail the build on a number nobody chose.
         -->
         <jacoco.line.coverage.minimum>0.00</jacoco.line.coverage.minimum>
+
+        <!--
+          Security overrides of versions the Boot and Cloud BOMs would otherwise pick. The
+          image scan (Trivy, CRITICAL, in CI) fails on the versions those BOMs ship with:
+          Tomcat 10.1.53 (six CVEs fixed by 10.1.58; 10.1.58 itself was never published),
+          Netty 4.1.132 (CVE-2026-75595, fixed in 4.1.137) and BouncyCastle 1.80, which
+          spring-cloud-starter pulls in (CVE-2025-14813, CVE-2026-8763, fixed in 1.85).
+          Each one is the same minor line the BOM chose, so these are patch bumps, not
+          upgrades. Drop an entry once spring-boot.version / spring-cloud.version ships an
+          equal or newer version; a stale override would otherwise pin us backwards.
+        -->
+        <tomcat.version>10.1.60</tomcat.version>
+        <netty.version>4.1.138.Final</netty.version>
+        <bouncycastle.version>1.86</bouncycastle.version>
     </properties>
 
     <dependencyManagement>
         <dependencies>
+            <!--
+              The overrides above. Boot's versions arrive through an imported BOM, and an
+              imported BOM's own properties cannot be overridden from here (that only works
+              with spring-boot-starter-parent), so the versions are pinned directly: explicit
+              entries always beat imported ones, and among imports the first one declared
+              wins, which is why netty-bom sits before spring-boot-dependencies.
+            -->
+            <dependency>
+                <groupId>io.netty</groupId>
+                <artifactId>netty-bom</artifactId>
+                <version>${netty.version}</version>
+                <type>pom</type>
+                <scope>import</scope>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-core</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-el</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.tomcat.embed</groupId>
+                <artifactId>tomcat-embed-websocket</artifactId>
+                <version>${tomcat.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.bouncycastle</groupId>
+                <artifactId>bcprov-jdk18on</artifactId>
+                <version>${bouncycastle.version}</version>
+            </dependency>
             <dependency>
                 <groupId>org.springframework.boot</groupId>
                 <artifactId>spring-boot-dependencies</artifactId>

@@ -17,9 +17,13 @@ RUN npm run typecheck && npm run lint && npm test && npm run build \
 # ---- runtime ----------------------------------------------------------------------------
 FROM nginx:1.27-alpine
 
+# apk upgrade first: the 1.27 tag is no longer rebuilt, so its Alpine packages go stale (the
+# CI image scan failed on its OpenSSL, CVE-2026-31789). Upgrading in the build picks up the
+# fixed packages without changing the nginx version the config was written against.
 # Our nginx.conf replaces the image's: it writes only under /tmp and listens on 8080, so it
 # runs unprivileged on a read-only root filesystem. default.conf would listen on 80.
-RUN rm -f /etc/nginx/conf.d/default.conf && mkdir -p /etc/nginx/sdp
+RUN apk upgrade --no-cache \
+    && rm -f /etc/nginx/conf.d/default.conf && mkdir -p /etc/nginx/sdp
 COPY nginx/nginx.conf /etc/nginx/nginx.conf
 COPY nginx/security-headers.conf /etc/nginx/security-headers.conf
 COPY --from=build /app/dist /usr/share/nginx/html
