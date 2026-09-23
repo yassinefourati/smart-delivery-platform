@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build context MUST be the repository root, e.g.:
 #   docker build -f payment-service/Dockerfile -t payment-service .
-FROM maven:3.9-eclipse-temurin-21-alpine AS build
+FROM maven:3-eclipse-temurin-26-alpine AS build
 WORKDIR /workspace
 
 # Leverage Docker layer caching: resolve dependencies before copying full sources
