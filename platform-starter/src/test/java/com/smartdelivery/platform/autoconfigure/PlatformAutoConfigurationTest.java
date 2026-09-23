@@ -1,6 +1,7 @@
 package com.smartdelivery.platform.autoconfigure;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.smartdelivery.platform.kafka.OwnedTopics;
 import com.smartdelivery.platform.observability.CorrelationIdFilter;
 import com.smartdelivery.platform.openapi.PlatformOpenApiConfiguration;
 import com.smartdelivery.platform.outbox.OutboxCleanupJob;
@@ -105,6 +106,41 @@ class PlatformAutoConfigurationTest {
                 });
     }
 
+    // --- kafka topics -----------------------------------------------------------------
+
+    /**
+     * Off unless asked for: every test context in the platform starts without a broker,
+     * and a declared topic would make KafkaAdmin try to reach one at startup.
+     */
+    @Test
+    void topicCreationIsOffByDefault() {
+        kafkaRunner().run(context -> {
+            OwnedTopics topics = context.getBean(OwnedTopics.class);
+            assertThat(topics.topics("order.created")).isEmpty();
+        });
+    }
+
+    @Test
+    void topicSizingBindsFromTheEnvironmentNamesTheChartSets() {
+        kafkaRunner()
+                .withPropertyValues("kafka.topics.create=true", "kafka.topics.partitions=12",
+                        "kafka.topics.replicas=3")
+                .run(context -> assertThat(context.getBean(OwnedTopics.class).topics("order.created"))
+                        .singleElement()
+                        .satisfies(topic -> {
+                            assertThat(topic.numPartitions()).isEqualTo(12);
+                            assertThat(topic.replicationFactor()).isEqualTo((short) 3);
+                        }));
+    }
+
+    /** A bad size stops the service at startup, not at the broker hours later. */
+    @Test
+    void aZeroPartitionCountFailsTheContext() {
+        kafkaRunner()
+                .withPropertyValues("kafka.topics.create=true", "kafka.topics.partitions=0")
+                .run(context -> assertThat(context).hasFailed());
+    }
+
     // --- openapi ----------------------------------------------------------------------
 
     @Test
@@ -143,6 +179,11 @@ class PlatformAutoConfigurationTest {
         return new ApplicationContextRunner()
                 .withBean(ObjectMapper.class, ObjectMapper::new)
                 .withConfiguration(AutoConfigurations.of(PlatformSecurityAutoConfiguration.class));
+    }
+
+    private ApplicationContextRunner kafkaRunner() {
+        return new ApplicationContextRunner()
+                .withConfiguration(AutoConfigurations.of(PlatformKafkaAutoConfiguration.class));
     }
 
     @SuppressWarnings("unchecked")

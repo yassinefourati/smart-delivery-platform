@@ -1,0 +1,111 @@
+name: Load test
+
+# Manual only (Phase 23, docs/load-testing.md). A load test is an experiment somebody
+# runs on purpose and reads, not a gate: its numbers depend on the runner's two to four
+# cores, which are shared by k6 and the whole platform, so they are comparable run to
+# run on the same runner type -- useful for "did this change make it slower?" -- and
+# say nothing about production capacity. That needs a staging cluster.
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "k6 profile (smoke | load | stress | spike | soak)"
+        required: true
+        default: stress
+        type: choice
+        options: [smoke, load, stress, spike, soak]
+      rate:
+        description: "Multiplier on every arrival rate in the profile (0.25 suits a GitHub runner)"
+        required: true
+        default: "0.25"
+      hold:
+        description: "Steady-state duration for the load profile (e.g. 5m); ignored by the others"
+        required: false
+        default: "5m"
+
+permissions:
+  contents: read
+
+jobs:
+  load-test:
+    name: k6 ${{ inputs.profile }} x${{ inputs.rate }} against Docker Compose
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      K6_VERSION: v2.3.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Start the platform
+        run: docker compose up -d --build
+
+      # Every container with a health check must report healthy -- the same rule as the
+      # smoke test, because `web` and the gateway start last.
+      - name: Wait for every service to be healthy
+        run: |
+          deadline=$(( $(date +%s) + 420 ))
+          while :; do
+            not_ready="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$2 != "" && $2 != "healthy"')"
+            [ -z "$not_ready" ] && curl -sf http://localhost:8080/actuator/health >/dev/null && break
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "::error::not healthy in time: $not_ready"; docker compose ps; exit 1
+            fi
+            sleep 5
+          done
+          docker compose ps
+
+      - name: Install k6
+        run: |
+          curl -sSfL "https://github.com/grafana/k6/releases/download/${K6_VERSION}/k6-${K6_VERSION}-linux-amd64.tar.gz" \
+            | tar xz --strip-components=1 -C /usr/local/bin "k6-${K6_VERSION}-linux-amd64/k6"
+          k6 version
+
+      # Thresholds that fail make k6 exit non-zero; the step is allowed to, so the summary
+      # below is still written and the job shows red only when the run itself broke.
+      - name: Run k6 (${{ inputs.profile }})
+        id: k6
+        continue-on-error: true
+        env:
+          PROFILE: ${{ inputs.profile }}
+          RATE: ${{ inputs.rate }}
+          HOLD: ${{ inputs.hold }}
+        run: |
+          k6 run --no-color -e PROFILE="$PROFILE" -e RATE="$RATE" -e HOLD="$HOLD" \
+            --summary-export k6-summary.json load/sdp-load.js | tee k6-output.txt
+
+      - name: Publish the summary
+        if: always()
+        env:
+          PROFILE: ${{ inputs.profile }}
+          RATE: ${{ inputs.rate }}
+          K6_OUTCOME: ${{ steps.k6.outcome }}
+        run: |
+          {
+            echo "## k6 ${PROFILE} x${RATE}"
+            echo
+            echo '```'
+            sed -n '/THRESHOLDS/,$p' k6-output.txt 2>/dev/null | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ "$K6_OUTCOME" != "success" ]; then
+            echo "::warning::k6 thresholds were crossed -- read the summary; see docs/load-testing.md"
+          fi
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k6-${{ inputs.profile }}
+          path: |
+            k6-summary.json
+            k6-output.txt
+          if-no-files-found: ignore
+
+      - name: Compose logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail=200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes --remove-orphans

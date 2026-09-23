@@ -46,7 +46,8 @@
   - `kubeconform -strict` over all of them and over `deploy/cluster/`, against the
     Kubernetes schemas **and the real CRD schemas** from the datreeio CRDs-catalog.
     Nothing is skipped any more; before Phase 22 the Prometheus Operator objects were.
-  - Nine deliberately unsafe renders that must be refused, each checked for its message.
+  - Thirteen deliberately unsafe renders that must be refused, each checked for its
+    message (Phase 23 added an unknown `database.topology` and zero Kafka partitions).
     A guard nobody fires is a guard nobody knows still works.
   - The alert rules must parse: `promtool check rules` for the Prometheus rules,
     `lokitool rules lint` for the Loki ones.
@@ -295,6 +296,23 @@ strings — `@ConditionalOnProperty` treats a declared-but-blank property as pre
 would turn the opt-in into an always-on. They are set as environment variables in
 `docker-compose.yml` (with an obviously-local-only password) and nowhere else, so a
 deployment that doesn't set them gets no seeded account at all.
+
+## Load test (manual, Phase 23)
+
+`.github/workflows/load-test.yml` runs the k6 suite in `load/sdp-load.js` against the
+Compose stack on a GitHub runner, **only when started by hand** (Actions → Load test →
+Run workflow). You choose a profile (`smoke`, `load`, `stress`, `spike`, `soak`), a rate
+multiplier (default `0.25`) and, for `load`, the hold duration.
+
+It is deliberately not a gate on pushes or PRs. The numbers depend on a runner whose
+two to four cores are shared by k6 and all nine containers. They are comparable from run
+to run on the same runner type, which is useful for "did this change make it slower?",
+but they say nothing about production capacity. That needs a staging cluster. For the
+same reason a crossed threshold only produces a warning. The job goes red only when the
+run itself breaks: the stack doesn't become healthy, or k6 can't start. The k6 summary
+is written to the job summary, and the full output plus `--summary-export` JSON are
+uploaded as the `k6-<profile>` artifact. See [load-testing.md](load-testing.md) for how
+to read them.
 
 ## Dependency updates
 

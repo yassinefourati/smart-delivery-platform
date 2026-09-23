@@ -2,3 +2,4 @@ com.smartdelivery.platform.autoconfigure.PlatformWebAutoConfiguration
 com.smartdelivery.platform.autoconfigure.PlatformSecurityAutoConfiguration
 com.smartdelivery.platform.autoconfigure.PlatformOutboxAutoConfiguration
 com.smartdelivery.platform.autoconfigure.PlatformOpenApiAutoConfiguration
+com.smartdelivery.platform.autoconfigure.PlatformKafkaAutoConfiguration

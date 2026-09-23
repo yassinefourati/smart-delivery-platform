@@ -87,12 +87,15 @@ before Phase 17 an order stalled in `INVENTORY_RESERVED` had no terminal state a
 sequenceDiagram
     participant C as Customer
     participant O as Order Service
+    participant PR as Product Service
     participant I as Inventory Service
     participant P as Payment Service
     participant D as Delivery Service
     participant N as Notification Service
 
     C->>O: POST /api/v1/orders (Idempotency-Key)
+    O->>PR: GET /products/{id} per line (no transaction open)
+    PR-->>O: name, price, active
     O->>O: save Order(CREATED) + OutboxEvent(order.created) in one transaction
     O-->>C: 201 Created (orderId, status=CREATED)
     O->>I: POST /inventory/reserve
@@ -110,6 +113,21 @@ happen after the response is sent, and the client polls
 `GET /api/v1/orders/{id}/status` (or later, receives a push notification) to see it
 progress. This keeps `POST /orders` from blocking on two downstream services' latency
 and failure modes.
+
+**Pricing happens before the transaction, not inside it (Phase 23,
+[ADR 015](adr/015-capacity-no-remote-calls-in-transactions.md)).** Each line is priced
+by a synchronous call to product-service, which with retries can take up to about ten
+seconds. Until Phase 23 that call ran inside the order's transaction, so every in-flight
+create held a pooled database connection while it waited. A slow product-service then
+starved every other database path in order-service: status reads, the saga's listeners,
+the outbox. `create` is now three steps:
+1. The idempotency check, in a short read-only transaction.
+2. Pricing, with no transaction open.
+3. A transaction that re-checks the key, inserts the order and writes the outbox row.
+
+A slow product-service makes placing an order slow. It no longer makes order-service
+unavailable. `order_create_pricing_seconds` times step 2. The load test that measured the
+difference is in [load-testing.md](load-testing.md).
 
 ## Failure and compensation
 
@@ -129,7 +147,8 @@ required because the client may retry on a timeout without knowing whether the f
 request's `201` was lost in transit.
 
 Implementation: `orders` has a `UNIQUE (user_id, idempotency_key)` constraint. Before
-creating anything, `OrderService` checks for an existing order with that key; if found,
+creating anything (and so before calling product-service: a retry is answered even while
+product-service is down), `OrderService` checks for an existing order with that key; if found,
 it compares a SHA-256 fingerprint of the new request's meaningful content (shipping
 address + line items, order-independent) against the one stored on the original order.
 Same fingerprint → the original order is returned as-is (no re-pricing, no second call

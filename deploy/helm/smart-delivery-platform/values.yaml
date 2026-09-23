@@ -230,8 +230,20 @@ database:
   # each service), which needs a property this platform does not set yet.
   connectionTimeoutMs: "2000"
 
-  # Informational only -- NOTES.txt uses it to print the connection arithmetic
-  # above against whatever replica counts are actually configured.
+  # Where the six databases live, which decides what poolMax has to fit into
+  # (Phase 23). NOTES.txt does the arithmetic against whatever replica counts are
+  # configured, and says so when it does not fit.
+  #   shared       all six on ONE Postgres instance (Compose, a single RDS): the SUM
+  #                over services of maxReplicas x poolMax must fit maxConnectionsBudget.
+  #   per-service  one instance or cluster per service (deploy/helm/sdp-data): each
+  #                service's maxReplicas x poolMax must fit on its own, and
+  #                maxConnectionsBudget is the per-cluster limit -- with sdp-data, the
+  #                app role's connection limit (cluster.appConnectionLimit), not
+  #                max_connections.
+  topology: shared
+
+  # The connection budget: the whole instance for `shared`, one cluster's app-role
+  # limit for `per-service`. Informational -- NOTES.txt checks against it.
   maxConnectionsBudget: 100
 
   # Flyway settings that only matter under Kubernetes. Compose hides both behind
@@ -493,6 +505,28 @@ externalSecrets:
   #   sdp-order-db:
   #     DB_USERNAME: {key: prod/sdp/order-service/db, property: username}
   #     DB_PASSWORD: {key: prod/sdp/order-service/db, property: password}
+
+# -----------------------------------------------------------------------------
+# kafka -- topic partitions and consumer threads (Phase 23, ADR 015)
+# -----------------------------------------------------------------------------
+kafka:
+  topics:
+    # Each producing service declares the topics it owns at startup (platform-starter
+    # OwnedTopics): created if missing, partitions INCREASED if an existing topic has
+    # fewer (Kafka cannot decrease them). Needs the create/alter-topic permission; if
+    # topics are owned by infrastructure-as-code instead (Strimzi KafkaTopic, Terraform
+    # for MSK), leave this off and give them the same partition count there.
+    create: false
+    # A consumer group gets at most one active consumer per partition, so this is the
+    # ceiling on how many orders the saga can work on at once. Size it to the largest
+    # replicas x listenerConcurrency of any consuming service. Every event is keyed by
+    # its aggregate id, so one order's events stay on one partition, in order.
+    partitions: 6
+    # -1 = the broker's default replication factor.
+    replicas: -1
+  # Consumer threads per @KafkaListener in each pod. 1 plus a broker default of one
+  # partition is what used to cap the whole saga at one thread per topic.
+  listenerConcurrency: 1
 
 # -----------------------------------------------------------------------------
 # pod -- security context and scheduling, shared by all eight services

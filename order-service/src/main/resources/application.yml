@@ -89,6 +89,12 @@ spring:
       # On shutdown, stop after the current record instead of draining up to 500. The rest
       # are redelivered -- safe (idempotent consumers, ADR 002), but more duplicates per deploy.
       immediate-stop: true
+      # Consumer threads per listener in this pod (Phase 23, ADR 015). A group gets at most
+      # one active consumer per partition, so pods x concurrency above the topic's partition
+      # count (kafka.topics.partitions) only adds idle threads. 1 here, raised by Compose and
+      # the Helm chart; each thread is a Kafka consumer and, while it handles a record, a
+      # database connection -- keep it within database.poolMax.
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:1}
 
 server:
   port: 8084

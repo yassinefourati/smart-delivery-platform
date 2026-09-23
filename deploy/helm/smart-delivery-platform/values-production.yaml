@@ -35,30 +35,29 @@ common:
 
 database:
   # verify-full against the CloudNativePG CA, which trust-manager copies into this
-  # namespace as ConfigMap sdp-postgres-ca (deploy/cluster/trust-manager/).
+  # namespace as ConfigMap sdp-postgres-ca (deploy/cluster/cert-manager/postgres-ca.yaml).
   tls:
     enabled: true
-  # Lowered from 5 because the HPAs below raise the CEILING this has to be sized
-  # against, and the ceiling is what matters -- the connections are taken when the
-  # autoscaler scales, not when somebody reviews the values file.
+  # One CloudNativePG cluster per service (deploy/helm/sdp-data), so each service's
+  # pool is sized against its OWN cluster, not against one shared instance
+  # (Phase 23, ADR 015). The limit that binds is the app role's connectionLimit in
+  # sdp-data (cluster.appConnectionLimit, 120), and the worst case is the largest
+  # autoscaling ceiling:
   #
-  #   user-service      maxReplicas 6
-  #   product-service   maxReplicas 8
-  #   inventory, order, payment, delivery   2 each
-  #   ---------------------------------------------
-  #   22 pods x 4 = 88 connections
+  #   product-service   maxReplicas 8  x 10 = 80
+  #   user-service      maxReplicas 6  x 10 = 60
+  #   the other four    2 replicas     x 10 = 20 each
   #
-  # 88 fits even a stock max_connections of 100. At HikariCP's untuned default of
-  # 10 the same topology would want 220, and the service that lost the race would
-  # not degrade -- it would fail to start, because Flyway could not get a
-  # connection.
-  #
-  # This arithmetic assumes all six databases live on ONE Postgres instance, which
-  # is the conservative case. Six separate instances (or a managed service per
-  # service) means only the per-service figure matters, and this can go back up.
-  poolMax: 4
-  # A managed instance is usually configured well above the container default.
-  maxConnectionsBudget: 200
+  # Until Phase 23 this was 4, sized for all six databases sharing ONE instance
+  # (22 pods x 4 = 88 of a stock 100). That premise stopped being true when Phase 22
+  # gave every service its own cluster. 4 per pod then only limited order-service,
+  # and it made the pool the first thing to run out: in the load test, a slow
+  # product-service pinned all four within a minute (docs/load-testing.md). Back on a
+  # shared instance, set topology: shared and re-do the sum -- NOTES.txt prints it.
+  poolMax: 10
+  topology: per-service
+  # = sdp-data cluster.appConnectionLimit
+  maxConnectionsBudget: 120
 
 # Every service gets a second replica except user-service, which needs one more
 # thing first -- see below. Two replicas is the point of this whole phase: it is
@@ -232,6 +231,16 @@ rollouts:
   enabled: true
   services:
     - order-service
+
+# Partitions and consumer threads (Phase 23, ADR 015). 2 order-service pods x 3 threads
+# = 6 consumers per group, one per partition: every saga step is worked on six orders
+# at a time instead of one. Replication 3 on a managed broker (MSK: one broker per AZ).
+kafka:
+  topics:
+    create: true
+    partitions: 6
+    replicas: 3
+  listenerConcurrency: 3
 
 secrets:
   create: false

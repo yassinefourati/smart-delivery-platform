@@ -56,6 +56,11 @@ services:
       KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Six partitions for anything auto-created -- dead-letter topics, and any topic a
+      # consumer subscribes to before its producer has declared it. The producers declare
+      # their own topics with six as well (KAFKA_TOPICS_CREATE below); one partition would
+      # serialise every consumer group through a single thread (Phase 23, ADR 015).
+      KAFKA_NUM_PARTITIONS: 6
       CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
@@ -225,6 +230,9 @@ services:
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      # Declares the topics this service publishes to, with KAFKA_TOPICS_PARTITIONS
+      # (default 6) partitions -- platform-starter OwnedTopics, ADR 015.
+      KAFKA_TOPICS_CREATE: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -263,6 +271,12 @@ services:
       # match user-service's ORDER_SERVICE_CLIENT_SECRET below.
       ORDER_SERVICE_CLIENT_SECRET: local-dev-only-order-service-secret
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      # Declares the topics this service publishes to, with KAFKA_TOPICS_PARTITIONS
+      # (default 6) partitions -- platform-starter OwnedTopics, ADR 015.
+      KAFKA_TOPICS_CREATE: "true"
+      # Three consumer threads per listener, so the six partitions are actually worked in
+      # parallel instead of by one thread (ADR 015).
+      KAFKA_LISTENER_CONCURRENCY: "3"
     depends_on:
       postgres:
         condition: service_healthy
@@ -299,6 +313,9 @@ services:
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      # Declares the topics this service publishes to, with KAFKA_TOPICS_PARTITIONS
+      # (default 6) partitions -- platform-starter OwnedTopics, ADR 015.
+      KAFKA_TOPICS_CREATE: "true"
     depends_on:
       postgres:
         condition: service_healthy
@@ -329,6 +346,12 @@ services:
       DB_USERNAME: sdp
       DB_PASSWORD: sdp_local_dev_only
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      # Declares the topics this service publishes to, with KAFKA_TOPICS_PARTITIONS
+      # (default 6) partitions -- platform-starter OwnedTopics, ADR 015.
+      KAFKA_TOPICS_CREATE: "true"
+      # Three consumer threads per listener, so the six partitions are actually worked in
+      # parallel instead of by one thread (ADR 015).
+      KAFKA_LISTENER_CONCURRENCY: "3"
     depends_on:
       postgres:
         condition: service_healthy
@@ -355,6 +378,9 @@ services:
       SPRING_PROFILES_ACTIVE: docker
       OTLP_TRACING_ENDPOINT: http://tempo:4318/v1/traces
       KAFKA_BOOTSTRAP_SERVERS: kafka:19092
+      # Three consumer threads per listener, so the six partitions are actually worked in
+      # parallel instead of by one thread (ADR 015).
+      KAFKA_LISTENER_CONCURRENCY: "3"
     depends_on:
       kafka:
         condition: service_healthy

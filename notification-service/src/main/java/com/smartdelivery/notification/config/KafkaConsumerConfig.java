@@ -38,8 +38,15 @@ public class KafkaConsumerConfig {
         // and tests all refer to. Relying on the default meant poison messages piled up on
         // a topic nobody was watching -- found in Phase 16, when this test ran end to end
         // for the first time in a while.
+        // Partition -1, not record.partition(): the producer then picks the partition from
+        // the record's key, as for any other send. Mirroring the source partition number only
+        // works while the .DLT topic has at least as many partitions as its source, and it
+        // usually has fewer -- it is auto-created with the broker default, while the source
+        // topics are declared with kafka.topics.partitions (Phase 23, ADR 015). A dead letter
+        // from partition 5 of a six-partition topic would then fail to publish, and the
+        // failure handling for a poison message would itself start failing.
         var recoverer = new DeadLetterPublishingRecoverer(kafkaTemplate,
-                (record, exception) -> new TopicPartition(record.topic() + DLT_SUFFIX, record.partition()));
+                (record, exception) -> new TopicPartition(record.topic() + DLT_SUFFIX, -1));
         var backOff = new FixedBackOff(1000L, 3);
         return new DefaultErrorHandler(recoverer, backOff);
     }

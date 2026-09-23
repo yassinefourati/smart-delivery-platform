@@ -51,6 +51,14 @@ data:
   # simply empty with nothing to explain it.
   OTLP_TRACING_ENDPOINT: {{ .Values.common.otlpTracingEndpoint | quote }}
   KAFKA_BOOTSTRAP_SERVERS: {{ .Values.common.kafkaBootstrapServers | quote }}
+  # Topic partitions and consumer threads (Phase 23, ADR 015). Producers declare the
+  # topics they own with this many partitions (platform-starter OwnedTopics); consumers
+  # run this many threads per listener. Shared, because a partition count and the
+  # consumer count that is meant to use it are only meaningful together.
+  KAFKA_TOPICS_CREATE: {{ .Values.kafka.topics.create | quote }}
+  KAFKA_TOPICS_PARTITIONS: {{ .Values.kafka.topics.partitions | quote }}
+  KAFKA_TOPICS_REPLICAS: {{ .Values.kafka.topics.replicas | quote }}
+  KAFKA_LISTENER_CONCURRENCY: {{ .Values.kafka.listenerConcurrency | quote }}
   # Identifiers, not URLs anything resolves. Validated as the `iss` and `aud`
   # claims by every resource server.
   JWT_ISSUER: {{ .Values.common.jwtIssuer | quote }}
