@@ -53,6 +53,19 @@ categories, products, warehouses and stock; register a new account to shop. For 
 work without rebuilding the image, run the platform and then `npm run dev` in `frontend/`
 (Vite on :5173, proxying to the gateway) -- see [frontend.md](frontend.md).
 
+An empty platform has nothing to browse. `scripts/seed-demo-data.sh` fills it through the
+gateway: 5 categories, 20 products, 2 warehouses with stock chosen to show every stock
+state (plenty, "only N left", out of stock), 3 customers with addresses, and one order
+each, which the saga takes to "waiting for a courier" on its own. It is safe to re-run --
+it skips what exists, and the orders carry a fixed `Idempotency-Key`, so a second run
+replays them rather than placing more. `SEED_ORDERS=0` skips the orders; the customers
+sign in with `demo-password-123`. It creates no delivery agents, because no endpoint can
+grant the `DELIVERY_AGENT` role.
+
+```bash
+docker compose up -d --build && scripts/seed-demo-data.sh
+```
+
 `scripts/e2e-smoke.sh` drives a complete customer journey against this stack through the
 gateway -- register, stock a product, place an order, follow it to `PAID`, oversell,
 cancel and refund. `SKIP_BUILD=1` reuses already-built images and `KEEP_STACK=1` leaves

@@ -59,7 +59,8 @@ docker compose up -d --build
 This builds and starts every service plus Postgres, Kafka, and Redis on one shared
 Docker network. Each service exposes a health check at
 `http://localhost:<port>/actuator/health`; the gateway waits for all backend services
-to report healthy before starting. Then open **<http://localhost:8088>** for the web app
+to report healthy before starting. `scripts/seed-demo-data.sh` then fills it with a demo
+catalog, stock, customers and orders (safe to re-run). Open **<http://localhost:8088>** for the web app
 (storefront and staff screens; [docs/frontend.md](docs/frontend.md)). See
 [docs/local-development.md](docs/local-development.md) for running a single service
 outside Docker, database access, and troubleshooting.
