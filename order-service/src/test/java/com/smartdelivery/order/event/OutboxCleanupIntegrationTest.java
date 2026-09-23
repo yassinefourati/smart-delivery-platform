@@ -67,9 +67,13 @@ class OutboxCleanupIntegrationTest {
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
         // See OutboxConcurrencyIntegrationTest: parks the application's own scheduled
-        // poller and cleanup job so they cannot act on this test's rows.
+        // poller and cleanup job so they cannot act on this test's rows. The initial delays
+        // matter here: in CI the app's startup cleanup run once landed mid-insert and
+        // deleted half of twoConcurrentCleanupRuns...'s rows itself (counter 10, not 20).
         registry.add("outbox.poll-interval-ms", () -> "3600000");
         registry.add("outbox.cleanup-interval-ms", () -> "3600000");
+        registry.add("outbox.poll-initial-delay-ms", () -> "3600000");
+        registry.add("outbox.cleanup-initial-delay-ms", () -> "3600000");
     }
 
     @Autowired

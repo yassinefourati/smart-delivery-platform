@@ -85,9 +85,10 @@ class StuckSagaReaperIntegrationTest {
         registry.add("spring.security.oauth2.resourceserver.jwt.jwk-set-uri", JWT_ISSUER::jwkSetUri);
         registry.add("spring.security.oauth2.resourceserver.jwt.issuer-uri", () -> TestJwtIssuer.ISSUER);
         registry.add("spring.security.oauth2.resourceserver.jwt.audiences", () -> TestJwtIssuer.AUDIENCE);
-        // The application's own reaper runs once at startup, before any of these orders
-        // exist, and never again while the test drives its own instances by hand.
+        // Parks the application's own reaper for the whole run: the interval alone would
+        // still let its first run fire at startup, racing the orders a test is inserting.
         registry.add("saga.reaper-interval-ms", () -> "3600000");
+        registry.add("saga.reaper-initial-delay-ms", () -> "3600000");
     }
 
     @TestConfiguration

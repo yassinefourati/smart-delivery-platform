@@ -89,8 +89,10 @@ class OrderCancellationCompensationIntegrationTest {
         // about Resilience4j's, which has its own test (ResilienceIntegrationTest).
         registry.add("resilience4j.retry.instances.payment-service.max-attempts", () -> "1");
         registry.add("resilience4j.retry.instances.inventory-service.max-attempts", () -> "1");
-        // The reaper would otherwise notice these deliberately-stalled orders.
+        // The reaper would otherwise notice these deliberately-stalled orders. Both
+        // properties, because a fixedDelay schedule's first run ignores the interval.
         registry.add("saga.reaper-interval-ms", () -> "3600000");
+        registry.add("saga.reaper-initial-delay-ms", () -> "3600000");
     }
 
     @TestConfiguration

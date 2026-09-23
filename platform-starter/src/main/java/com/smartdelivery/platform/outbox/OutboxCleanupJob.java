@@ -44,7 +44,11 @@ public class OutboxCleanupJob {
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
-    @Scheduled(fixedDelayString = "${outbox.cleanup-interval-ms:3600000}")
+    // A fixedDelay schedule with no initial delay runs once the moment the context starts,
+    // whatever the interval says. The initial delay defaults to that same 0; it exists so a
+    // test can park the job completely instead of racing its first run.
+    @Scheduled(fixedDelayString = "${outbox.cleanup-interval-ms:3600000}",
+            initialDelayString = "${outbox.cleanup-initial-delay-ms:0}")
     public void deleteExpiredPublishedEvents() {
         Instant cutoff = Instant.now().minus(properties.retention());
         int deletedTotal = 0;

@@ -76,7 +76,9 @@ public class OutboxPublisher {
         this.transactionTemplate = new TransactionTemplate(transactionManager);
     }
 
-    @Scheduled(fixedDelayString = "${outbox.poll-interval-ms:2000}")
+    // Initial delay defaults to 0 (poll at startup, as before); see OutboxCleanupJob.
+    @Scheduled(fixedDelayString = "${outbox.poll-interval-ms:2000}",
+            initialDelayString = "${outbox.poll-initial-delay-ms:0}")
     public void publishPending() {
         transactionTemplate.executeWithoutResult(status -> publishBatch());
     }
