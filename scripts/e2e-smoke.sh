@@ -39,13 +39,19 @@ info()  { printf '    %s\n' "$*"; }
 pass()  { printf '    \033[0;32mPASS\033[0m %s\n' "$*"; }
 fail()  { printf '    \033[0;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
-on_error() {
+# An EXIT trap, not ERR: fail() ends the script with an explicit `exit 1`, and bash does
+# not run an ERR trap for that -- so with ERR, every assertion failure (which is every
+# interesting failure) skipped the log dump AND the teardown. EXIT runs on every path.
+on_exit() {
     local exit_code=$?
-    printf '\n\033[0;31mSmoke test failed (exit %s). Dumping logs to %s\033[0m\n' "$exit_code" "$LOG_DIR" >&2
-    mkdir -p "$LOG_DIR"
-    docker compose logs --no-color --timestamps > "$LOG_DIR/docker-compose.log" 2>&1 || true
-    docker compose ps > "$LOG_DIR/docker-compose-ps.txt" 2>&1 || true
-    print_unhealthy_diagnostics
+    trap - EXIT
+    if [ "$exit_code" -ne 0 ]; then
+        printf '\n\033[0;31mSmoke test failed (exit %s). Dumping logs to %s\033[0m\n' "$exit_code" "$LOG_DIR" >&2
+        mkdir -p "$LOG_DIR"
+        docker compose logs --no-color --timestamps > "$LOG_DIR/docker-compose.log" 2>&1 || true
+        docker compose ps > "$LOG_DIR/docker-compose-ps.txt" 2>&1 || true
+        print_unhealthy_diagnostics
+    fi
     teardown
     exit "$exit_code"
 }
@@ -76,7 +82,7 @@ teardown() {
     fi
 }
 
-trap on_error ERR
+trap on_exit EXIT
 
 # --- HTTP helpers ------------------------------------------------------------------
 
@@ -119,16 +125,22 @@ fi
 step "Waiting for every service to report healthy (up to ${HEALTH_TIMEOUT_SECONDS}s)"
 deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
 while :; do
-    # The gateway starts last and only once every backend is healthy (docker-compose.yml),
-    # so the gateway answering is itself the readiness signal for the whole platform.
-    if [ "$(api GET /actuator/health)" = "200" ]; then
+    # Every container with a health check must be `healthy`, not just the gateway: `web`
+    # depends on the gateway, so it is still `starting` for a few seconds after the
+    # gateway first answers. Checking once at that moment failed the run on a container
+    # that was about to be fine. `starting` means keep waiting; `unhealthy` means Docker
+    # has already given up on it, so there is nothing to wait for.
+    not_ready="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$2 != "" && $2 != "healthy"' || true)"
+    if [ -z "$not_ready" ] && [ "$(api GET /actuator/health)" = "200" ]; then
         break
     fi
-    [ "$(date +%s)" -lt "$deadline" ] || fail "services did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s"
+    if printf '%s\n' "$not_ready" | grep -q ' unhealthy$'; then
+        fail "some services are unhealthy: $(printf '%s' "$not_ready" | tr '\n' ' ')"
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] \
+        || fail "services did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s: $(printf '%s' "$not_ready" | tr '\n' ' ')"
     sleep 5
 done
-unhealthy="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$2 != "" && $2 != "healthy"' || true)"
-[ -z "$unhealthy" ] || fail "some services are not healthy: $unhealthy"
 pass "all services healthy, gateway answering on $GATEWAY"
 
 # --- the web tier ------------------------------------------------------------------
@@ -376,4 +388,4 @@ pass "order $CANCELLED_ORDER_ID cancelled while PAID, and its payment is REFUNDE
 # --- done ----------------------------------------------------------------------------
 
 step "All smoke checks passed"
-teardown
+# teardown runs from the EXIT trap, on success as on failure.
