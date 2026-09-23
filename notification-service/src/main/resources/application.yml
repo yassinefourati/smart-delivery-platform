@@ -1,6 +1,12 @@
 spring:
   application:
     name: notification-service
+  # Kubernetes readiness (Phase 20). Each setting states its reason in a line; the
+  # full argument is docs/kubernetes.md and docs/adr/010-probe-and-lifecycle-contract.md.
+  lifecycle:
+    # Bounds EACH shutdown phase, not the total. The pod's terminationGracePeriodSeconds
+    # must cover preStop + 2 x this, and the Helm chart refuses to render if it does not.
+    timeout-per-shutdown-phase: ${SHUTDOWN_PHASE_TIMEOUT:20s}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     # Plain JSON strings, not Java-type-headered objects -- see docs/kafka-events.md
@@ -15,9 +21,15 @@ spring:
       value-deserializer: org.apache.kafka.common.serialization.StringDeserializer
       auto-offset-reset: earliest
       enable-auto-commit: false
+    listener:
+      # On shutdown, stop after the current record instead of draining up to 500. The rest
+      # are redelivered -- safe (idempotent consumers, ADR 002), but more duplicates per deploy.
+      immediate-stop: true
 
 server:
   port: 8087
+  # Boot 3.5's default already; stated because the grace-period arithmetic depends on it.
+  shutdown: graceful
 
 management:
   endpoints:
@@ -27,6 +39,19 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Two probe groups for the kubelet, with no shared dependency in either (ADR 010).
+      # /actuator/health is unchanged and still aggregates db, Kafka and Redis.
+      probes:
+        enabled: true
+      group:
+        # Liveness: is this JVM wedged? Never Postgres, Kafka or Redis -- a shared outage
+        # must not restart every replica at once.
+        liveness:
+          include: livenessState
+        # Readiness: can this instance take traffic? Shared dependencies are deliberately
+        # excluded; ADR 010 records which failure that choice accepts.
+        readiness:
+          include: readinessState
   metrics:
     distribution:
       percentiles-histogram:

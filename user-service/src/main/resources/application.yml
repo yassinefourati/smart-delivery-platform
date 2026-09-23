@@ -1,10 +1,22 @@
 spring:
   application:
     name: user-service
+  # Kubernetes readiness (Phase 20). Each setting states its reason in a line; the
+  # full argument is docs/kubernetes.md and docs/adr/010-probe-and-lifecycle-contract.md.
+  lifecycle:
+    # Bounds EACH shutdown phase, not the total. The pod's terminationGracePeriodSeconds
+    # must cover preStop + 2 x this, and the Helm chart refuses to render if it does not.
+    timeout-per-shutdown-phase: ${SHUTDOWN_PHASE_TIMEOUT:20s}
   datasource:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/user_db}
     username: ${DB_USERNAME:sdp}
     password: ${DB_PASSWORD:sdp_local_dev_only}
+    # Both Hikari defaults are wrong for a pod. A 30s connection-timeout parks the same
+    # request threads that serve the probes -- a restart storm even with db out of the
+    # probe groups -- and 10 x 6 services x 2 replicas exceeds Postgres's 100 connections.
+    hikari:
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:2000}
+      maximum-pool-size: ${DB_POOL_MAX:5}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -16,9 +28,18 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # Kubernetes has no depends_on, so a pod scheduled before Postgres is up would
+    # crash-loop. The interval must be set with the count: Boot's default is 120s.
+    connect-retries: ${FLYWAY_CONNECT_RETRIES:10}
+    connect-retries-interval: ${FLYWAY_CONNECT_RETRIES_INTERVAL:5s}
+    # Flyway's own default, stated because it is a cliff: replicas waiting on another's
+    # migration give up after ~50s. Raise it before any migration that could run longer.
+    lock-retry-count: ${FLYWAY_LOCK_RETRY_COUNT:50}
 
 server:
   port: 8081
+  # Boot 3.5's default already; stated because the grace-period arithmetic depends on it.
+  shutdown: graceful
 
 management:
   endpoints:
@@ -28,6 +49,19 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Two probe groups for the kubelet, with no shared dependency in either (ADR 010).
+      # /actuator/health is unchanged and still aggregates db, Kafka and Redis.
+      probes:
+        enabled: true
+      group:
+        # Liveness: is this JVM wedged? Never Postgres, Kafka or Redis -- a shared outage
+        # must not restart every replica at once.
+        liveness:
+          include: livenessState
+        # Readiness: can this instance take traffic? Shared dependencies are deliberately
+        # excluded; ADR 010 records which failure that choice accepts.
+        readiness:
+          include: readinessState
   metrics:
     distribution:
       percentiles-histogram:

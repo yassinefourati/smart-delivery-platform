@@ -29,7 +29,18 @@ import org.springframework.security.web.SecurityFilterChain;
 public class SecurityConfig {
 
     private static final String[] PUBLIC_ENDPOINTS = {
-            "/actuator/health", "/actuator/info", "/actuator/metrics",
+            // The two probe paths are listed EXACTLY. requestMatchers("/actuator/health")
+            // matches that path and nothing below it, so without them the kubelet's
+            // unauthenticated probe got a 401 and every replica of this service would have
+            // restarted forever -- while the two services with no security chain stayed up,
+            // which reads as a cluster fault. Not /actuator/health/**, which would also hand
+            // every component path (db, redis, circuitBreakers) to anyone. See ADR 010.
+            //
+            // /actuator/prometheus is a pre-existing bug fixed here: it has been exposed and
+            // scraped since Phase 12 but was in no public list, so Prometheus got a 401 from
+            // this service the whole time. See docs/kubernetes.md.
+            "/actuator/health", "/actuator/health/liveness", "/actuator/health/readiness",
+            "/actuator/info", "/actuator/metrics", "/actuator/prometheus",
             // /v3/api-docs stays public: api-gateway fetches it unauthenticated to build
             // the aggregated Swagger UI (docs/api-documentation.md). The /swagger-ui
             // patterns stay listed because the UI is switched off by configuration, not

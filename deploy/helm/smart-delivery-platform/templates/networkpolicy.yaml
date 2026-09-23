@@ -1,0 +1,102 @@
+{{/*
+================================================================================
+NetworkPolicy. Off by default, and READ THIS BEFORE TURNING IT ON, because the
+semantics are the opposite of what the name suggests.
+
+A NetworkPolicy with policyTypes: [Ingress] that SELECTS a pod DENIES all other
+ingress to that pod. So the "allow Prometheus to scrape" policy that gets written
+in a hurry does not add an allowance on a cluster that was not already
+default-deny -- it takes away gateway-to-backend traffic and breaks the platform,
+with the symptom appearing as connection timeouts through the gateway a few
+seconds after `helm upgrade`.
+
+This policy therefore allows, in ONE object, every ingress path this platform
+actually has on the http port:
+  - from the monitoring namespace          (the scrape)
+  - from every pod in THIS namespace       (gateway -> backends, order-service ->
+                                            inventory/payment/user-service,
+                                            frontend -> gateway)
+and a second object opens api-gateway (and the SPA) to the ingress controller's
+namespace, which is the only thing outside this namespace that should reach them.
+
+EGRESS IS DELIBERATELY NOT RESTRICTED. Locking it down means naming kube-dns
+(53/UDP and 53/TCP), Postgres, Kafka, Redis and the OTLP collector, and in a
+managed setup half of those are IP ranges outside the cluster rather than pod
+selectors. A policy that names some of them fails closed on the rest -- the same
+class of mistake as the ingress trap above -- so it is documented here rather
+than half-written.
+================================================================================
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "internal") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "internal") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: smart-delivery-platform
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        # Prometheus. Matched on kubernetes.io/metadata.name, which the API server
+        # sets automatically on every namespace (1.21+), so this needs no label
+        # added by hand.
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.monitoringNamespace }}
+        # Everything in this namespace. Without this clause, selecting these pods
+        # at all would sever gateway -> backend.
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: http
+        {{- if eq (include "sdp.probePortName" .) "mgmt" }}
+        # The management connector, when one is configured. It carries the probe
+        # endpoints and /actuator/prometheus, and it has NO Spring Security filter
+        # chain (the main context's SecurityFilterChain does not apply to the
+        # management child context) -- so this policy is what bounds it to the
+        # monitoring namespace and this one.
+        - protocol: TCP
+          port: mgmt
+        {{- end }}
+{{- $gw := index .Values.services "api-gateway" }}
+{{- if and $gw $gw.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "edge") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "edge") | nindent 4 }}
+spec:
+  # The gateway and the SPA are the only two workloads anything outside this
+  # namespace should reach. Selected by name rather than by part-of so a new
+  # backend does not become internet-reachable by inheriting a label.
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - api-gateway
+          {{- if .Values.frontend.enabled }}
+          - {{ .Values.frontend.name }}
+          {{- end }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.ingressControllerNamespace }}
+      ports:
+        - protocol: TCP
+          port: http
+{{- end }}
+{{- end }}

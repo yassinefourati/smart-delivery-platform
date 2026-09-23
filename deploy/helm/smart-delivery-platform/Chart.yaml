@@ -1,0 +1,55 @@
+apiVersion: v2
+name: smart-delivery-platform
+description: >-
+  The eight Smart Delivery Platform services (api-gateway plus seven backends) as one
+  Helm release. Brings no datastores with it -- Postgres, Kafka and Redis are expected to
+  exist already, as managed services or operator-managed clusters.
+type: application
+
+# The chart's own version, bumped when the templates change.
+version: 0.1.0
+
+# The default image tag for all eight services, overridable per service. `latest` is what
+# .github/workflows/ci.yml publishes on every push to main, and it is the wrong thing to
+# run anywhere that matters: two installs a week apart run different code under the same
+# name, `helm rollback` rolls the chart back and leaves the image where it was, and there
+# is no way to read what a pod is running off the manifest. CI also publishes
+# :<commit-sha> for every build; that is the value to set. NOTES.txt says so on every
+# install that leaves this at `latest`.
+appVersion: "latest"
+
+# The floor for the ESCAPE-HATCH configuration, not for the defaults, because Helm
+# cannot express a constraint that depends on values:
+#
+#   defaults           need 1.30+   -- `lifecycle.preStop.sleep` (the native sleep
+#                                   action; the schema accepts it from 1.29, but the
+#                                   PodLifecycleSleepAction gate is alpha there and
+#                                   only beta-and-default-on from 1.30, GA in 1.32)
+#                      and 1.27+    -- topologySpreadConstraints.matchLabelKeys,
+#                                   though an older API server silently DROPS that
+#                                   field rather than rejecting it, which brings back
+#                                   the rollout stall it exists to prevent
+#   1.25 - 1.29        set lifecycle.preStopUseNativeSleep=false (renders the exec
+#                      form instead) and topologySpread.matchLabelKeys=[]
+#
+# 1.25 is the floor either way, for the per-probe terminationGracePeriodSeconds the
+# liveness and startup probes rely on.
+kubeVersion: ">= 1.25.0-0"
+
+keywords:
+  - microservices
+  - spring-boot
+  - saga
+  - outbox
+home: https://github.com/yassinefourati/smart-delivery-platform
+sources:
+  - https://github.com/yassinefourati/smart-delivery-platform
+
+maintainers:
+  - name: Smart Delivery Platform
+    url: https://github.com/yassinefourati/smart-delivery-platform
+
+annotations:
+  # This chart has never been applied to a Kubernetes cluster. See README.md, "What has
+  # actually been verified".
+  sdp.dev/verified-against-cluster: "false"

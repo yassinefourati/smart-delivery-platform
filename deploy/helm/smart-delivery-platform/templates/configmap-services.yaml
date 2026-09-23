@@ -1,0 +1,145 @@
+{{/*
+================================================================================
+One ConfigMap per service, for the values that are genuinely that service's own.
+
+Anything identical across services lives in sdp-common (see
+configmap-common.yaml) or is derived once from values.yaml's `database:` and
+`outbox:` blocks and rendered into each service that needs it -- so there is one
+place to change the Hikari pool size or the outbox retention, not six.
+
+api-gateway and notification-service would have no per-service ConfigMap at all
+were it not for the gateway's connection-pool settings; notification-service
+genuinely has none, and no object is rendered for it.
+================================================================================
+*/}}
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $own := default (dict) $svc.config }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sdp.configName" (dict "root" $root "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+data:
+  # ---- shutdown ------------------------------------------------------------
+  # This service's application.yml reads SHUTDOWN_PHASE_TIMEOUT into
+  # spring.lifecycle.timeout-per-shutdown-phase, which bounds EACH SmartLifecycle
+  # shutdown phase independently. It is set here rather than left to the
+  # application default so that it and terminationGracePeriodSeconds in the
+  # Deployment come from one place -- those two numbers plus the preStop sleep are
+  # one decision, and the chart fails the render if they disagree.
+  SHUTDOWN_PHASE_TIMEOUT: {{ printf "%vs" $svc.shutdownPhaseTimeoutSeconds | quote }}
+{{- if $svc.schedulerPoolSize }}
+  # One thread per @Scheduled method. Boot's default of 1 means the outbox
+  # publisher holding its transaction across a batch is time in which the cleanup
+  # job -- and, in order-service, the stuck-saga reaper -- do not run at all, which
+  # reads as "the reaper is broken" and is really "it never got a thread". More
+  # replicas do not fix it: each one has the same single thread.
+  SCHEDULER_POOL_SIZE: {{ $svc.schedulerPoolSize | quote }}
+{{- end }}
+{{- if $svc.ownsSchema }}
+  # ---- database -----------------------------------------------------------
+  # Host, port and database name only. No credentials in the URL: they come from
+  # this service's own Secret, matching what application.yml already does with
+  # separate username/password properties. A URL with credentials in it would drag
+  # this whole ConfigMap into a Secret.
+  DB_URL: {{ required (printf "services.%s.config.DB_URL is required for a service with ownsSchema=true" $name) (get $own "DB_URL") | quote }}
+  # Six services x this pool x replicas must stay under Postgres max_connections.
+  # At HikariCP's default of 10 and two replicas that is 120 against a stock 100,
+  # and the service that loses does not degrade -- it fails to start, because
+  # Flyway cannot get a connection. Set here rather than in application.yml
+  # because Spring's relaxed binding reads spring.datasource.hikari.* from the
+  # environment whether or not application.yml declares it, so the chart can fix
+  # the ceiling with no code change.
+  SPRING_DATASOURCE_HIKARI_MAXIMUM_POOL_SIZE: {{ $root.Values.database.poolMax | quote }}
+  # MILLISECONDS, not a Duration -- this binds onto
+  # HikariConfig.setConnectionTimeout(long), so "2s" would fail to bind.
+  #
+  # This is the chart's mitigation for the fact that BOTH PROBE GROUPS ARE SERVED
+  # BY THE SAME TOMCAT WORKER POOL AS APPLICATION TRAFFIC (nothing in this
+  # repository sets management.server.port). Keeping `db` out of the probe groups
+  # removed the cheap dependency check and left the expensive coupling in place:
+  # with the default 30s connection-timeout, a slow database parks all 200 workers
+  # in HikariPool.getConnection(), the kubelet's probe is accepted at the socket
+  # and never dispatched, it blows timeoutSeconds, and every replica of every
+  # schema-owning service fails liveness in the same tick -- the platform-wide
+  # restart storm the probe design exists to prevent, arriving by another route.
+  #
+  # Two seconds makes a saturated pod SHED load instead of accumulating threads: a
+  # request that cannot get a connection fails fast into platform-starter's
+  # 503-with-a-correlation-id, the worker returns to the pool, and there is a
+  # thread free to answer the probe. It trades requests that would have succeeded
+  # after a long wait for a pod that stays diagnosable and stays alive. The real
+  # fix is services.<name>.managementPort, which needs a property this platform
+  # does not set yet.
+  SPRING_DATASOURCE_HIKARI_CONNECTION_TIMEOUT: {{ $root.Values.database.connectionTimeoutMs | quote }}
+  # ---- Flyway under Kubernetes -------------------------------------------
+  # Kubernetes has no equivalent of Compose's `depends_on: condition:
+  # service_healthy`: a pod is scheduled the moment a node has room for it,
+  # whether or not Postgres is accepting connections, and Flyway's own default is
+  # connect-retries=0. So a database five seconds behind the pod is a failed
+  # context refresh, a non-zero exit, and CrashLoopBackOff whose exponential
+  # backoff then costs minutes for a pod that was forty seconds from ready. This
+  # retry loop is what replaces depends_on, and it covers the whole application
+  # rather than just Flyway, because the EntityManagerFactory is built after the
+  # Flyway initializer.
+  #
+  # These three names are the ones the services' application.yml declares
+  # (${FLYWAY_CONNECT_RETRIES:...} and friends). If that stanza is not present in
+  # the image being deployed, these are SILENTLY IGNORED -- the canonical
+  # SPRING_FLYWAY_CONNECT_RETRIES / _CONNECT_RETRIES_INTERVAL /
+  # _LOCK_RETRY_COUNT would bind regardless, but naming a knob twice is how the
+  # two copies diverge, so the chart uses the declared names and says so here
+  # instead. README.md lists this under "Prerequisites in the application config".
+  FLYWAY_CONNECT_RETRIES: {{ $root.Values.database.flyway.connectRetries | quote }}
+  # Boot's default interval is 120s, so the count is meaningless without this:
+  # "60 retries" would be two hours.
+  FLYWAY_CONNECT_RETRIES_INTERVAL: {{ $root.Values.database.flyway.connectRetriesInterval | quote }}
+  # -1 = wait indefinitely for a peer replica's migration, bounded instead by the
+  # startupProbe (300s) and then by progressDeadlineSeconds. At Flyway's default
+  # of 50 this is a ~50 second CLIFF rather than a gentle degradation: a migration
+  # slower than that makes every sibling replica throw and crashloop while the
+  # winner finishes. Old pods keep serving, so the symptom is a stalled rollout
+  # that looks exactly like a broken one -- and whoever is watching will be
+  # tempted to raise the number rather than read the signal.
+  FLYWAY_LOCK_RETRY_COUNT: {{ $root.Values.database.flyway.lockRetryCount | quote }}
+{{- end }}
+{{- if $svc.hasOutbox }}
+  # ---- outbox (ADR 004, ADR 006) -----------------------------------------
+{{- $replicas := int (default 1 $svc.replicaCount) }}
+{{- if $root.Values.outbox.scalePollInterval }}
+  # DERIVED: basePollIntervalMs x replicaCount. Every replica runs the claim query
+  # on its own timer, and that query is not cheap (FOR UPDATE SKIP LOCKED with a
+  # correlated NOT EXISTS for oldest-per-aggregate), so a fixed interval means R
+  # replicas cost R times the database load for identical throughput -- the batch
+  # size is per poll. Scaling the interval keeps the effective per-aggregate poll
+  # rate at one every {{ $root.Values.outbox.basePollIntervalMs }}ms across the
+  # fleet: same database load, same per-aggregate latency, same total throughput.
+  #
+  # Which is the honest conclusion: replicas buy the outbox AVAILABILITY, not
+  # throughput. Set outbox.scalePollInterval=false to buy throughput and pay for
+  # it in database load deliberately.
+  OUTBOX_POLL_INTERVAL_MS: {{ mul (int $root.Values.outbox.basePollIntervalMs) $replicas | quote }}
+{{- else }}
+  # Fixed, not scaled with replicas: this release has chosen to pay R times the
+  # claim-query load for R times the publish throughput. See ADR 006.
+  OUTBOX_POLL_INTERVAL_MS: {{ $root.Values.outbox.basePollIntervalMs | quote }}
+{{- end }}
+{{- range $key, $value := default (dict) $root.Values.outbox.env }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- if gt (len $own) 0 }}
+  # ---- this service's own knobs ------------------------------------------
+{{- range $key, $value := $own }}
+{{- if not (and $svc.ownsSchema (eq $key "DB_URL")) }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

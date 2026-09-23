@@ -1,0 +1,48 @@
+{{/*
+================================================================================
+PodDisruptionBudget, off by default, and SKIPPED for any service that would be at
+one replica even when it is on.
+
+That skip is the whole reason this is a separate template with logic in it. A PDB
+on a single-replica Deployment makes the eviction API refuse forever: `kubectl
+drain` hangs, the node cannot be patched, and the error message points at the PDB
+rather than at the replica count. maxUnavailable: 1 does not save you -- with one
+replica, evicting it takes availability to zero, which the budget forbids.
+
+maxUnavailable rather than minAvailable, too: with an HPA in play a minAvailable
+pinned to today's replica count blocks drains as soon as it scales down.
+================================================================================
+*/}}
+{{- if .Values.podDisruptionBudget.enabled }}
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $autoscaled := dig "autoscaling" "enabled" false $svc }}
+{{- $floor := ternary (int (dig "autoscaling" "minReplicas" 1 $svc)) (int (default 1 $svc.replicaCount)) $autoscaled }}
+{{- if gt $floor 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "sdp.name" (dict "root" $root "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+spec:
+  maxUnavailable: {{ $root.Values.podDisruptionBudget.maxUnavailable }}
+  selector:
+    matchLabels:
+      {{- include "sdp.selectorLabels" (dict "root" $root "name" $name) | nindent 6 }}
+{{- else }}
+{{/*
+No PodDisruptionBudget for this service: its floor is one replica, and a PDB on a
+single-replica Deployment makes the eviction API refuse forever, so a node drain
+would hang. Raise its replicaCount (or its autoscaling.minReplicas) and the object
+appears by itself. This is a TEMPLATE comment rather than a YAML one on purpose --
+a rendered document containing only comments is not reliably skipped, and a
+cosmetic note is not worth a failed install. NOTES.txt reports the skip instead.
+*/}}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

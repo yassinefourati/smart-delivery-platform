@@ -1,0 +1,130 @@
+{{/*
+================================================================================
+The optional Ingress -- one host for the API and the SPA.
+
+ONE HOST is the whole design, and the reason is in api-gateway's own
+application.yml: the Swagger UI urls are relative "so there is no CORS
+configuration to get wrong". A grep for "cors" across this entire repository
+returns that one comment and nothing else. So a frontend on its own origin would
+need CORS added to the gateway -- a code change, a new allowed-origins env var,
+and a preflight failure mode that looks like the API being down. Serving both from
+one host is what lets the SPA ship a base path of "" -- src/config.ts asserts the
+value is relative and rejects an absolute origin -- so none of that has to be
+invented.
+
+This host MUST equal the host in common.publicGatewayUrl, or Swagger UI's "Try it
+out" advertises a cluster-internal name that resolves to nothing in a browser.
+
+/actuator is NEVER routed here, at any setting. The probe paths and
+/actuator/prometheus are reachable UNAUTHENTICATED on the pod port -- that is what
+makes probes and scraping work at all -- and publishing them would hand endpoint
+URIs, DB pool sizes and JVM internals to the internet.
+================================================================================
+*/}}
+{{- if .Values.ingress.enabled }}
+{{- $root := . }}
+{{- $gwName := include "sdp.name" (dict "root" . "name" "api-gateway") }}
+{{- $gwPort := (index .Values.services "api-gateway").port }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "ingress") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "ingress") | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- if .Values.ingress.tls.enabled }}
+  tls:
+    - hosts:
+        - {{ .Values.ingress.host | quote }}
+      secretName: {{ required "ingress.tls.secretName is required when ingress.tls.enabled is true (cert-manager can create it, but the name has to be stated)" .Values.ingress.tls.secretName }}
+  {{- end }}
+  rules:
+    - host: {{ .Values.ingress.host | quote }}
+      http:
+        paths:
+          # Everything a client is supposed to call. The gateway's own routing
+          # predicates take it from here, so this stays one rule rather than one
+          # per service -- and the e2e smoke test's constraint ("every call goes
+          # through the gateway") is preserved for real traffic too.
+          - path: /api/v1
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $gwName }}
+                port:
+                  number: {{ $gwPort }}
+          {{- if .Values.ingress.exposeJwks }}
+          # Public and unauthenticated BY DESIGN (ADR 007): a JWKS holds public
+          # keys only, and a resource server must fetch it before it can
+          # authenticate anything. Exact, not Prefix -- there is exactly one
+          # document at this path and nothing below it should be reachable.
+          - path: /.well-known/jwks.json
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $gwName }}
+                port:
+                  number: {{ $gwPort }}
+          {{- end }}
+          {{- if .Values.ingress.exposeSwaggerUi }}
+          # The aggregated Swagger UI and the six per-service documents. OFF by
+          # default: publishing a complete, accurate description of every endpoint
+          # to the internet is a decision, not a default.
+          #
+          # Note the three separate paths. springdoc serves /v3/api-docs/swagger-config
+          # from the gateway itself, and the gateway's routes deliberately write out
+          # /v3/api-docs/<service> one by one rather than wildcarding, for exactly
+          # that reason -- a wildcard would swallow swagger-config and route it to
+          # user-service, and the UI would come up empty with nothing in the log to
+          # say why. A Prefix rule here is safe because the gateway, not the ingress
+          # controller, does the discriminating.
+          - path: /swagger-ui.html
+            pathType: Exact
+            backend:
+              service:
+                name: {{ $gwName }}
+                port:
+                  number: {{ $gwPort }}
+          - path: /swagger-ui
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $gwName }}
+                port:
+                  number: {{ $gwPort }}
+          - path: /v3/api-docs
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $gwName }}
+                port:
+                  number: {{ $gwPort }}
+          {{- end }}
+          {{- if .Values.frontend.enabled }}
+          # The SPA, last and least specific. A React router needs every unknown
+          # path to reach index.html, which is why this is a Prefix on / and why it
+          # has to be the least specific rule -- an ingress controller matches the
+          # longest path first, so /api/v1 above wins for API calls.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "sdp.name" (dict "root" $root "name" .Values.frontend.name) }}
+                port:
+                  number: {{ .Values.frontend.service.port }}
+          {{- end }}
+{{- if not .Values.frontend.enabled }}
+# There is deliberately NO `/` rule while frontend.enabled is false. Routing / at
+# the gateway instead would publish every path the gateway knows -- including
+# /swagger-ui.html and /v3/api-docs -- through the front door, which is the thing
+# ingress.exposeSwaggerUi exists to make a decision rather than an accident.
+{{- end }}
+{{- end }}

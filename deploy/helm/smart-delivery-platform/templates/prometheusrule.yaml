@@ -1,0 +1,141 @@
+{{/*
+================================================================================
+Alert rules. Off by default (needs the Prometheus Operator CRDs).
+
+THERE ARE NO ALERT RULES IN THIS REPOSITORY TODAY --
+infrastructure/prometheus/prometheus.yml has no rule_files at all. Under
+docker-compose that was defensible because a human was looking at Grafana. In a
+cluster nobody is, and the first group below exists specifically so that "the
+observability broke" is LOUD instead of silent: a failed scrape is
+indistinguishable from a healthy-but-quiet service on every panel of the
+platform-overview dashboard.
+
+The job regex and the expected job count are GENERATED from the services map, so
+they cannot drift from the Services the chart creates and they follow
+naming.prefix automatically.
+
+The thresholds are reasoned from docs/observability.md and ADR 006/008, NOT
+measured -- nothing here has ever run. Expect to retune them: a noisy alert gets
+muted, and a muted alert is a blank dashboard with extra steps.
+================================================================================
+*/}}
+{{- if .Values.observability.prometheusRule.enabled }}
+{{- $jobs := include "sdp.jobNames" . | splitList " " }}
+{{- $jobRegex := $jobs | join "|" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "platform") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "platform") | nindent 4 }}
+    # Must match the Prometheus CR's spec.ruleSelector -- same silent-ignore trap
+    # as the ServiceMonitor's label.
+    {{- toYaml .Values.observability.prometheusRule.extraLabels | nindent 4 }}
+spec:
+  groups:
+    # ---- did the observability itself break --------------------------------
+    - name: sdp-scrape-health
+      interval: 30s
+      rules:
+        - alert: SdpTargetDown
+          expr: up{job=~"{{ $jobRegex }}"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ `{{ $labels.job }}` }} pod {{ `{{ $labels.instance }}` }} is not being scraped"
+            description: >-
+              A failed scrape is indistinguishable from a healthy-but-silent
+              service on every panel of the platform-overview dashboard. A 401 from
+              /actuator/prometheus lands here too, which is how the long-standing
+              gap where six of eight services were never in any PUBLIC_ENDPOINTS
+              list would have been caught had this rule existed.
+        - alert: SdpPlatformJobMissing
+          # `up == 0` cannot fire for a job that vanished entirely: there is no
+          # series left to compare. Counting jobs instead catches "the
+          # ServiceMonitor selector stopped matching" and "somebody forgot
+          # notification-service's Service", which are the two ways this platform
+          # loses a whole job at once.
+          expr: count(count by (job) (up{job=~"{{ $jobRegex }}"})) != {{ len $jobs }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Fewer than {{ len $jobs }} smart-delivery-platform jobs are reporting to Prometheus"
+    # ---- the gauges docs/observability.md already names as alert-worthy -----
+    - name: sdp-outbox
+      interval: 30s
+      rules:
+        - alert: SdpOutboxStalled
+          # max, NOT sum. outbox.oldest.pending.age.seconds and
+          # outbox.pending.count are registered as gauges that query the database
+          # AT SCRAPE TIME, so every replica reports the same global number --
+          # summing them multiplies the backlog by the replica count. The Grafana
+          # dashboard has the same bug on its outbox-backlog panel (panel 9 uses
+          # sum by (job) where panel 10 correctly uses max by (job)); fixing that
+          # JSON is outside this chart's paths, so it is recorded in README.md
+          # under "Known gaps" instead.
+          expr: max by (job) (outbox_oldest_pending_age_seconds) > {{ .Values.observability.prometheusRule.thresholds.outboxOldestPendingAgeSeconds }}
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "{{ `{{ $labels.job }}` }} has outbox rows older than {{ .Values.observability.prometheusRule.thresholds.outboxOldestPendingAgeSeconds }}s"
+        - alert: SdpOutboxPublishFailing
+          expr: sum by (job, eventType) (rate(outbox_publish_failures_total[10m])) > 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ `{{ $labels.job }}` }} is failing to publish outbox events ({{ `{{ $labels.eventType }}` }})"
+    # ---- the saga ----------------------------------------------------------
+    - name: sdp-saga
+      interval: 30s
+      rules:
+        - alert: SdpSagaStuck
+          # Also a DB-global gauge, so max rather than sum.
+          expr: max(saga_stuck_count) > 0
+          for: 15m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Sagas have been stuck for 15 minutes with the reaper unable to clear them"
+        - alert: SdpSagaAbandoned
+          # No `for`: one compensated-and-FAILED order is customer-visible.
+          expr: increase(saga_reaper_failed_total[15m]) > 0
+          labels:
+            severity: critical
+          annotations:
+            summary: "The stuck-saga reaper abandoned a saga and marked an order FAILED"
+    # ---- HTTP --------------------------------------------------------------
+    - name: sdp-http
+      interval: 30s
+      rules:
+        - alert: SdpHighErrorRate
+          # The uri!~"/actuator.*" guard is belt-and-braces: the ServiceMonitor
+          # already drops those series. It is repeated here so that if that
+          # relabeling is ever removed, this alert does not silently start
+          # measuring kubelet probes and reporting a healthy platform.
+          expr: |
+            sum by (job) (rate(http_server_requests_seconds_count{job=~"{{ $jobRegex }}",status=~"5..",uri!~"/actuator.*"}[5m]))
+              / sum by (job) (rate(http_server_requests_seconds_count{job=~"{{ $jobRegex }}",uri!~"/actuator.*"}[5m])) > {{ .Values.observability.prometheusRule.thresholds.httpErrorRate }}
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ `{{ $labels.job }}` }} is returning more than {{ .Values.observability.prometheusRule.thresholds.httpErrorRate }} 5xx"
+    # ---- what is deliberately NOT alerted on -------------------------------
+    # No alert on liveness/readiness probe failures: a pod failing readiness drops
+    # out of the ServiceMonitor's target list entirely (role: endpoints scrapes
+    # ready pods only), so the series disappears rather than going to 0 -- and
+    # SdpTargetDown cannot fire on a series that is gone. Pod-level health has to
+    # come from kube-state-metrics (kube_pod_container_status_restarts_total,
+    # kube_pod_status_ready), which is not this chart's to install.
+    #
+    # No alert on Kafka consumer lag, which is the metric that would actually tell
+    # you notification-service has stopped working: there is no Kafka health
+    # indicator on that classpath and no kafka-exporter anywhere in this
+    # repository, so the series does not exist yet. It is the most valuable
+    # missing alert in this file.
+{{- end }}

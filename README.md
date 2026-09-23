@@ -81,6 +81,7 @@ mvn clean install
 - [Observability](docs/observability.md)
 - [Testing](docs/testing.md)
 - [CI/CD](docs/ci-cd.md)
+- [Kubernetes](docs/kubernetes.md)
 - [Local development](docs/local-development.md)
 - [Architecture Decision Records](docs/adr)
 
@@ -381,6 +382,39 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       work rather than merely exist is the `servers` entry -- left to itself springdoc would
       advertise `http://order-service:8084`, a hostname that resolves to nothing in a
       browser, so every "Try it out" would fail from a UI that looked perfectly fine.
+- [x] **Phase 20 -- Kubernetes readiness**: every service can now run as more than one
+      replica behind real probes, and a Helm chart exists to put it there -- but the
+      headline is what *would* have gone wrong. `requestMatchers("/actuator/health")`
+      matches that exact path and nothing below it, so the kubelet's unauthenticated
+      `GET /actuator/health/liveness` would have got a `401` and **every replica of all
+      six secured services would have restarted forever**, while the two services with no
+      security chain stayed up -- a CrashLoopBackOff that reads as a cluster fault and is a
+      one-line authorization problem. Checking that turned up a **pre-existing bug:
+      Prometheus has been getting `401` from six of eight services since Phase 12**, for the
+      same exact-match reason, so those Grafana panels could never have shown data. The
+      probe design ([ADR 010](docs/adr/010-probe-and-lifecycle-contract.md)) keeps every
+      shared dependency out of both liveness and readiness, and it was **tested live by
+      stopping Postgres under the running services**: liveness stayed UP on all eight, so
+      no kubelet would have restarted anything, while the naive recipe (liveness on
+      `/actuator/health`) would have restarted all six database services at once into a
+      database that was still down. That test caught a second bug -- an unreachable
+      database returned `500 INTERNAL_ERROR` with a stack trace per request, not a
+      retryable `503`, which the ADR's own argument had assumed. Fixed, and the same test
+      then returned `503` in two seconds with one log line; with Postgres back, the same
+      process served `200` within a second, never restarted. The two seconds is itself a
+      fix: HikariCP's 30-second default would have parked the Tomcat threads that also serve
+      the probes, reproducing the restart storm *despite* the probe design; and its default
+      pool of 10 connections x 6 services x 2 replicas exceeds Postgres's 100. Also caught:
+      a single scheduler thread that let one slow outbox batch **starve the stuck-saga
+      reaper** entirely; a non-numeric `USER` that would stop every pod under
+      `runAsNonRoot`; and a `chown` that **shipped every image's jar twice (96MB on
+      order-service)**. The chart lints, renders with both values files, validates against
+      the published Kubernetes schemas (75 of 77 objects; the other two are CRDs with no
+      published schema), and carries seven render-time guards -- one refuses to scale
+      user-service without a shared signing key, which would otherwise give each replica a
+      different key under the same `kid` and fail roughly half of all tokens, forever. A new
+      `helm-chart` CI job keeps it rendering. **None of it has been applied to a cluster**:
+      there is no cluster. See [docs/kubernetes.md](docs/kubernetes.md).
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

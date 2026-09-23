@@ -66,6 +66,14 @@ the plain-text pattern above, since the `docker` profile is never active there.
 Compose container name; a `prometheus` service in `docker-compose.yml` runs it,
 persisting data to the `prometheus-data` volume, reachable at `localhost:9090`.
 
+**Until Phase 20, six of those eight scrapes were failing with `401`.** The endpoint was
+exposed, but it was missing from every `SecurityConfig`'s public list, and those lists
+match paths exactly -- so Prometheus, which sends no token, was rejected by every service
+with a security filter chain. Only api-gateway and notification-service, which have none,
+were ever scraped. `/actuator/prometheus` is now public on all six and was confirmed to
+return `200` unauthenticated against the running services
+([kubernetes.md](kubernetes.md#the-bug-that-would-have-stopped-every-pod)).
+
 `management.metrics.distribution.percentiles-histogram.http.server.requests: true` is
 set on every service so Prometheus gets the `_bucket` series `histogram_quantile` needs
 for the latency dashboard panel below — without it, Micrometer only exports the count
@@ -155,7 +163,9 @@ file's syntax and interpolation, `mvn compile`/`test` confirm every service buil
 starts, and the Prometheus/Tempo/Grafana config files were checked for valid YAML/JSON
 syntax — but the dashboards' PromQL queries, the Prometheus scrape targets actually
 succeeding, and the OTLP export actually reaching Tempo have not been exercised against
-a running stack. Metric names used in the dashboard (`http_server_requests_seconds_*`,
+a running stack. (Phase 20 confirmed the second of those was a real gap rather than a
+theoretical one: six of the eight scrape targets had been returning `401`. Now fixed --
+see above.) Metric names used in the dashboard (`http_server_requests_seconds_*`,
 `jvm_memory_used_bytes`, `jvm_gc_pause_seconds_sum`, `hikaricp_connections_*`) are
 Micrometer/Spring Boot's standard, documented metric names, not custom instrumentation,
 so this is a low-risk gap — but it is a real one, and running `docker compose up` to

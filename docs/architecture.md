@@ -118,16 +118,24 @@ Docker Compose on one bridge network (`smart-delivery-net`). There is no service
 registry (Eureka/Consul): the gateway and inter-service calls use static Docker Compose
 DNS names, overridable via environment variables. This is a deliberate simplification —
 see [ADR discussion below](#deferred-decisions) — appropriate while every service runs
-as exactly one instance. Kubernetes is explicitly out of scope until the Docker Compose
-system is fully working (see the master engineering brief, section 25).
+as exactly one instance.
+
+Since Phase 20 there is also a Helm chart under `deploy/helm/`, and every service is ready
+to run as more than one replica -- probes, graceful shutdown, container-aware JVM flags,
+and connection budgets that add up across replicas. It has been rendered and validated
+but **never applied to a cluster**, because there is no cluster to apply it to. See
+[kubernetes.md](kubernetes.md).
 
 ## Deferred decisions
 
 Documented here so they aren't silently forgotten:
 
 - **Service discovery.** Static DNS via Docker Compose is sufficient for one instance
-  per service. If/when services need multiple replicas locally, this is revisited
-  (Eureka or Consul, or moving to Kubernetes Services, which give this for free).
+  per service, and there is deliberately no registry (Eureka or Consul). The route to
+  multiple replicas is Kubernetes Services, which give DNS, load balancing and
+  health-based endpoint removal with no registry to run -- and the Helm chart uses exactly
+  that (Phase 20, [kubernetes.md](kubernetes.md)). Adding a registry there would mean
+  operating a second discovery mechanism beside the one the platform already provides.
 - **API Gateway authentication enforcement.** JWT validation at the edge vs. per-service
   is decided in [security.md](security.md) once the User Service issues tokens
   (Phase 2).

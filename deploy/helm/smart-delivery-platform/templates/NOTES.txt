@@ -1,0 +1,292 @@
+{{- $root := . }}
+{{- $gw := index .Values.services "api-gateway" }}
+{{- $gwName := include "sdp.name" (dict "root" . "name" "api-gateway") }}
+{{- $placeholders := list }}
+{{- if contains "REPLACE_ME" (toString .Values.common.kafkaBootstrapServers) }}{{ $placeholders = append $placeholders "common.kafkaBootstrapServers" }}{{ end }}
+{{- if contains "REPLACE_ME" (toString .Values.common.publicGatewayUrl) }}{{ $placeholders = append $placeholders "common.publicGatewayUrl" }}{{ end }}
+{{- if and .Values.ingress.enabled (contains "REPLACE_ME" (toString .Values.ingress.host)) }}{{ $placeholders = append $placeholders "ingress.host" }}{{ end }}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- range $k, $v := default (dict) $svc.config }}
+{{- if contains "REPLACE_ME" (toString $v) }}{{ $placeholders = append $placeholders (printf "services.%s.config.%s" $name $k) }}{{ end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $conns := 0 }}
+{{- $dbServices := list }}
+{{- range $name, $svc := .Values.services }}
+{{- if and $svc.enabled $svc.ownsSchema }}
+{{- $ceiling := ternary (int (dig "autoscaling" "maxReplicas" 1 $svc)) (int (default 1 $svc.replicaCount)) (dig "autoscaling" "enabled" false $svc) }}
+{{- $conns = add $conns (mul $ceiling (int $root.Values.database.poolMax)) }}
+{{- $dbServices = append $dbServices $name }}
+{{- end }}
+{{- end }}
+================================================================================
+ {{ .Chart.Name }} {{ .Chart.Version }}  ->  release {{ .Release.Name }} in namespace {{ .Release.Namespace }}
+================================================================================
+
+READ THIS FIRST. THIS CHART HAS NEVER BEEN APPLIED TO A REAL KUBERNETES CLUSTER.
+What WAS done: `helm lint` passes; `helm template` renders cleanly in 22 value
+combinations (the defaults, values-production.yaml, a naming prefix, and every
+optional block on its own); every rendered object parses as YAML and was read back
+field by field; `kubeconform -strict` validates all of them against the published
+Kubernetes API schemas at 1.31, which is what establishes that the newer fields here
+are real and not plausible-looking inventions; and every validation guard was fired
+on purpose to check its message.
+
+What was NOT done, because no cluster and no container runtime existed where this
+was written: no `helm install`; no kubelet has ever read one of these probe stanzas,
+so the timings are reasoned rather than measured; no scrape has ever hit
+/actuator/prometheus, so the Prometheus-Operator behaviour the Service names depend
+on is documented rather than observed -- CHECK /targets BEFORE TRUSTING A PANEL; no
+pod has ever been asked to shut down inside one of these grace periods; and a schema
+is not an admission controller, so nothing was checked against a PodSecurity
+standard, a LimitRange or an OPA policy. Treat every number as a starting point to be
+re-measured. A chart nobody has run is still useful; one that claims to be
+battle-tested is not.
+
+{{ if $placeholders }}
+--------------------------------------------------------------------------------
+ STOP: {{ len $placeholders }} PLACEHOLDER VALUE(S) ARE STILL SET
+--------------------------------------------------------------------------------
+{{ range $p := $placeholders }}  - {{ $p }}
+{{ end }}
+Nothing will work until these are real. Set them with -f my-values.yaml, then
+upgrade. (`helm get manifest {{ .Release.Name }} | grep REPLACE_ME` finds all of
+them, including any the chart did not think to check. Offline, that is
+`helm template ... --kube-version <your version> | grep REPLACE_ME` -- the flag is
+required because Helm has no cluster to ask and its hardcoded default claims v1.20.0,
+which this chart's kubeVersion constraint rejects.)
+{{ else }}
+No REPLACE_ME placeholders remain in the values the chart checks. Still worth a
+`helm get manifest {{ .Release.Name }} | grep REPLACE_ME` before trusting it.
+{{ end }}
+--------------------------------------------------------------------------------
+ 1. WHAT THIS CHART DID NOT CREATE, AND WILL NOT
+--------------------------------------------------------------------------------
+No Postgres, no Kafka, no Redis. Those are managed services, or operator-managed
+clusters (CloudNativePG, Strimzi), and the definitions of them in
+docker-compose.yml are for local development only -- a single-instance Postgres
+with one superuser and a Kafka broker in KRaft mode with no replication is the
+right shape for a laptop and the wrong shape for anything else. It also does not
+install Prometheus, Grafana, Tempo or an OTel Collector; it only points at them
+and, optionally, registers a ServiceMonitor and a PrometheusRule with an Operator
+that already exists.
+
+{{ if $dbServices }}
+BEFORE THE PODS CAN START, somebody has to create {{ len $dbServices }} databases
+and {{ len $dbServices }} roles. Flyway migrates WITHIN a database; it does not
+create the database or the role, and infrastructure/postgres/init-databases.sh is
+a Compose entrypoint hook that no cluster ever runs. Left undone, the first deploy
+fails at datasource initialization with a message about a database that does not
+exist.
+
+  {{ range $s := $dbServices }}{{ $s }} {{ end }}
+
+(one database per service, named in that service's DB_URL.)
+
+One role per service, GRANTed on its own database only -- a shared role would let
+a compromised product-service pod read order_db directly, undoing at the SQL layer
+the database-per-service boundary ADR 001 enforces in code. (Do NOT provision
+notification_db: init-databases.sh creates it, but notification-service has no
+spring.datasource at all and nothing has ever used it.)
+{{ end }}
+--------------------------------------------------------------------------------
+ 2. SECRETS
+--------------------------------------------------------------------------------
+{{- if .Values.secrets.create }}
+secrets.create is TRUE, so this release just created Secrets full of
+REPLACE_ME placeholders. They are there to show the shape and to let
+`helm template` prove the wiring; Postgres will reject them and JwtKeyProvider
+will throw on a PEM that is not one. That failure is correct -- a service that
+cannot sign or verify tokens must fail to start rather than mint garbage -- but it
+means this release cannot work until you replace them. Prefer secrets.create=false
+and the commands below.
+{{- else }}
+secrets.create is false, which is the recommendation: the chart holds no
+credential and never should. Create these yourself, in this namespace, before the
+pods can leave CreateContainerConfigError:
+{{ range $secretName, $data := .Values.secrets.placeholders }}
+  {{ $secretName }}: {{ keys $data | sortAlpha | join ", " }}
+{{- end }}
+
+  # The signing key -- generate out of band, never commit it.
+  openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out sdp-signing-key.pem
+  kubectl -n {{ .Release.Namespace }} create secret generic sdp-jwt-signing \
+    --from-file=JWT_PRIVATE_KEY=./sdp-signing-key.pem
+
+  # A database credential. --from-file, not --from-literal: a literal lands in
+  # the shell history.
+  kubectl -n {{ .Release.Namespace }} create secret generic sdp-user-db \
+    --from-literal=DB_USERNAME=user_service_role --from-file=DB_PASSWORD=./user-db-password.txt
+
+An External Secrets Operator syncing from AWS Secrets Manager, GCP Secret Manager,
+Azure Key Vault or Vault produces an ordinary Secret, so nothing in this chart
+changes when that lands -- keep the names above and it is a drop-in.
+{{- end }}
+
+A Kubernetes Secret is base64, not encryption. `echo <value> | base64 -d` is the
+whole protection: anyone with `get secrets` here has every plaintext, and so does
+anyone with an etcd backup. RBAC is the actual control.
+
+{{ if not .Values.secrets.jwtSigningKeyProvisioned }}
+--------------------------------------------------------------------------------
+ 3. user-service IS PINNED TO ONE REPLICA
+--------------------------------------------------------------------------------
+secrets.jwtSigningKeyProvisioned is false, so the chart will refuse to render more
+than one user-service replica. That is not caution for its own sake. With no
+JWT_PRIVATE_KEY, JwtKeyProvider generates a DIFFERENT throwaway RSA key in every
+replica and publishes them all under the SAME kid -- and Spring Security refetches
+a JWK set only on an UNKNOWN kid, so a verifier that cached the wrong pod's key
+returns an invalid-signature 401 it cannot recover from. Roughly (N-1)/N of tokens
+fail, per verifier, and the failing set reshuffles every time a cache expires. It
+does not stop at logins: order-service's SERVICE token fails at inventory-service,
+a 401 is not in that circuit breaker's ignore-exceptions, and the breaker opens --
+so a missing signing key reads on the Grafana dashboard as inventory-service being
+down.
+
+  1. provision sdp-jwt-signing (above);
+  2. set services.user-service.config.JWT_SIGNING_KID to a real generation label,
+     e.g. sdp-2026-04-a -- never the sdp-dev-key-1 default, which ends up stamped
+     in every production token's header;
+  3. set secrets.jwtSigningKeyProvisioned=true, then raise the replica count.
+
+One replica also means: no PodDisruptionBudget for user-service (a PDB there would
+hang every node drain), and a rolling update logs everyone out, because tokens
+signed by the replaced pod's ephemeral key stop verifying.
+{{ end }}
+--------------------------------------------------------------------------------
+ 4. PREREQUISITES IN THE APPLICATION CONFIG THAT THIS CHART CANNOT CHECK
+--------------------------------------------------------------------------------
+All of these were verified present in the services' application.yml when this chart
+was written. The list is here for the future where one is reverted, or a service is
+added without them -- each entry is the symptom, not a to-do.
+
+a) THE PROBE PATHS MUST BE PUBLIC. All three probes target
+   /actuator/health/liveness and /actuator/health/readiness, and
+   requestMatchers("/actuator/health") matches that path and NOTHING below it. If
+   the six services with a SecurityConfig do not list both probe paths in
+   PUBLIC_ENDPOINTS, the kubelet gets a 401, reads it as a failed probe, and every
+   one of those six restarts on a failureThreshold cadence forever -- while
+   api-gateway and notification-service, which have no security starter, stay up.
+   It looks like a cluster fault and it is a one-line authorization problem.
+   Check it the moment the pods are up:
+
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ $gwName }} -- \
+       wget -qO- http://user-service:8081/actuator/health/readiness
+
+b) /actuator/prometheus must be public for the same reason, or six of eight scrape
+   targets return 401 and those panels are blank with nothing saying why.
+
+c) management.endpoint.health.probes.enabled must be true, and the two groups must
+   be liveness: livenessState and readiness: readinessState. Note that turning
+   probes on also registers those two contributors in the DEFAULT group, so the
+   aggregate /actuator/health now returns 503 during shutdown and before
+   ApplicationReadyEvent -- harmless here, but worth knowing if anything alerts on
+   it.
+
+d) FLYWAY_CONNECT_RETRIES, FLYWAY_CONNECT_RETRIES_INTERVAL and
+   FLYWAY_LOCK_RETRY_COUNT are set by this chart but only bind if the services'
+   application.yml declares them. Without that, they are silently ignored and a
+   pod scheduled seconds before Postgres is ready crashloops instead of waiting.
+
+e) SHUTDOWN_PHASE_TIMEOUT likewise, plus SCHEDULER_POOL_SIZE on the four services
+   with @EnableScheduling. terminationGracePeriodSeconds is validated against the
+   phase timeout this chart sets, so if that placeholder disappears the grace period
+   is consistent with a number the application no longer reads.
+
+--------------------------------------------------------------------------------
+ 5. DATABASE CONNECTIONS -- THE CEILING THAT ARRIVES BEFORE CPU DOES
+--------------------------------------------------------------------------------
+{{ len $dbServices }} schema-owning services x pool {{ .Values.database.poolMax }} x their replica ceiling = {{ $conns }} connections.
+Budget (database.maxConnectionsBudget): {{ .Values.database.maxConnectionsBudget }}.
+{{- if gt (int $conns) (int .Values.database.maxConnectionsBudget) }}
+
+  *** {{ $conns }} EXCEEDS {{ .Values.database.maxConnectionsBudget }}. ***
+  The service that loses this race does not degrade -- it fails to start, because
+  Flyway cannot get a connection. Lower database.poolMax, raise Postgres
+  max_connections, or put PgBouncer in front.
+{{- if ne (int .Values.database.poolMax) 10 }}
+  (At HikariCP's untuned default pool of 10 the same topology would want {{ mul (div (int $conns) (int .Values.database.poolMax)) 10 }}.)
+{{- end }}
+{{- else }}
+  Fits, with {{ sub (int .Values.database.maxConnectionsBudget) (int $conns) }} left for psql, backups and whatever else connects.
+{{- end }}
+
+--------------------------------------------------------------------------------
+ 6. WATCH IT COME UP
+--------------------------------------------------------------------------------
+  kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ $gwName }} --timeout=300s
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/part-of=smart-delivery-platform -w
+
+A pod sitting in 0/1 Running for up to five minutes is EXPECTED on a first
+install, not a hang: the startupProbe has a 300s budget for six of the services,
+because Flyway runs before the port is open and that budget has to cover waiting
+for Postgres, waiting for a peer replica's migration, and the migration itself.
+`kubectl logs` shows which of the three it is doing.
+
+  kubectl -n {{ .Release.Namespace }} logs deploy/order-service --tail=50
+
+--------------------------------------------------------------------------------
+ 7. THE AGGREGATED SWAGGER UI
+--------------------------------------------------------------------------------
+One Swagger UI for the whole platform, at the gateway, with a dropdown for all six
+documented services -- see docs/api-documentation.md. Each service still generates
+its own /v3/api-docs; the gateway only collects them, so nothing there is
+hand-maintained and nothing can go stale.
+{{- if and .Values.ingress.enabled .Values.ingress.exposeSwaggerUi }}
+
+  http{{ if .Values.ingress.tls.enabled }}s{{ end }}://{{ .Values.ingress.host }}/swagger-ui.html
+
+It is reachable from outside the cluster because ingress.exposeSwaggerUi is true.
+That is a deliberate choice and worth re-examining: it publishes a complete,
+accurate description of every endpoint in the platform.
+{{- else }}
+
+Not exposed through the Ingress (ingress.exposeSwaggerUi is false, which is the
+default). Reach it without exposing anything:
+
+  kubectl -n {{ .Release.Namespace }} port-forward svc/{{ $gwName }} 8080:{{ $gw.port }}
+  # then open http://localhost:8080/swagger-ui.html
+
+"Try it out" calls whatever common.publicGatewayUrl says ({{ .Values.common.publicGatewayUrl }}),
+NOT localhost -- that value is baked into every service's OpenAPI document by
+platform-starter. Through a port-forward the buttons will therefore aim at the
+public host; that is correct behaviour, not a bug.
+{{- end }}
+
+--------------------------------------------------------------------------------
+ 8. WHAT IS SWITCHED OFF IN THIS RELEASE
+--------------------------------------------------------------------------------
+  ServiceMonitor ....... {{ if .Values.observability.serviceMonitor.enabled }}on{{ else }}OFF  (no metrics reach Prometheus; needs the Operator CRDs){{ end }}
+  PrometheusRule ....... {{ if .Values.observability.prometheusRule.enabled }}on{{ else }}OFF  (nothing alerts -- and liveness is livenessState only, so a service that is up and broken is never restarted; that detection was moved to these alerts on purpose){{ end }}
+  NetworkPolicy ........ {{ if .Values.networkPolicy.enabled }}on{{ else }}OFF{{ end }}
+  Ingress .............. {{ if .Values.ingress.enabled }}on  ({{ .Values.ingress.host }}){{ else }}OFF  (the gateway is not reachable from outside the cluster){{ end }}
+  React frontend ....... {{ if .Values.frontend.enabled }}on{{ else }}OFF  (no image is published for it yet){{ end }}
+  HPAs ................. {{ $hpas := list }}{{ range $n, $s := .Values.services }}{{ if and $s.enabled (dig "autoscaling" "enabled" false $s) }}{{ $hpas = append $hpas $n }}{{ end }}{{ end }}{{ if $hpas }}{{ join ", " $hpas }}{{ else }}none{{ end }}
+  PodDisruptionBudgets . {{ if .Values.podDisruptionBudget.enabled }}on, except for any service at one replica (a PDB there hangs every node drain){{ else }}OFF{{ end }}
+  topologySpread ....... {{ if .Values.topologySpread.enabled }}on ({{ .Values.topologySpread.whenUnsatisfiable }}){{ else }}OFF{{ end }}
+
+values-production.yaml, next to values.yaml in the chart, turns these on with the
+reasoning for each. Read it as the second half of values.yaml rather than as an
+example.
+
+--------------------------------------------------------------------------------
+ 9. IF SOMETHING IS WRONG
+--------------------------------------------------------------------------------
+  CreateContainerConfigError ... a Secret named in secretEnv does not exist yet.
+  ImagePullBackOff ............. the GHCR package is private; set image.pullSecrets.
+  CrashLoopBackOff on six of
+  eight services, gateway fine .. the probe paths are returning 401. Section 4a.
+  Pods Running but no metrics ... the ServiceMonitor's label does not match the
+                                  Prometheus CR's serviceMonitorSelector. Check
+                                  /targets, not the dashboard.
+  Intermittent 401s, and
+  inventory-service looks down .. more than one user-service replica without a
+                                  shared signing key. Section 3.
+  A rollout that never finishes .. a migration ran past a peer replica's Flyway
+                                  lock wait, or the startupProbe budget. Read the
+                                  logs of the pod that is NOT progressing.
+
+Full reasoning, and the list of things this chart knowingly does not fix:
+deploy/helm/smart-delivery-platform/README.md

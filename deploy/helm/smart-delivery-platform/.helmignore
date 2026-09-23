@@ -1,0 +1,14 @@
+# Patterns to ignore when building a chart package.
+.DS_Store
+.git/
+.gitignore
+*.swp
+*.bak
+*.tmp
+*.orig
+*~
+.idea/
+.vscode/
+# Example overlays are documentation, not part of the packaged chart's defaults. They are
+# kept in the chart directory so `helm install -f` can find them next to the values they
+# override, but they must never be mistaken for values the chart applies by itself.

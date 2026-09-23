@@ -29,6 +29,13 @@
   journey **through the gateway only**. See [the section below](#end-to-end-smoke-test).
 - **`compose-config`** — `docker compose config --quiet`, validating `docker-compose.yml`
   parses and every variable substitution resolves, on every push and PR.
+- **`helm-chart`** (Phase 20) — `helm lint`, then `helm template` with the default values
+  and with `values-production.yaml`, then `kubeconform -strict` against the published
+  Kubernetes API schemas, and finally a deliberately **unsafe** render that must fail:
+  the chart's grace-period guard has to refuse a `terminationGracePeriodSeconds` below
+  `preStop + 2 x timeout-per-shutdown-phase`. A guard nobody fires is a guard nobody
+  knows still works. The Prometheus Operator CRDs have no published schema, so
+  kubeconform skips those two objects rather than failing on them.
 
 ## Published images
 
@@ -255,10 +262,11 @@ transitively across files), and the GitHub Actions used in `ci.yml` itself.
 ## What's deliberately not here
 
 **Deployment.** This pipeline builds, tests, and publishes images — it does not deploy
-them anywhere. There is no Kubernetes manifest, Helm chart, or cloud environment
-anywhere in this repository to deploy *to*; adding a "deploy" job would mean inventing
-infrastructure this project doesn't have and pointing at a target that doesn't exist,
-which is worse than not having the step. `docker-compose.yml` remains the actual
+them anywhere. Since Phase 20 there **is** a Helm chart (`deploy/helm/`), but there is
+still no cluster to deploy it *to*; a "deploy" job would point at a target that does not
+exist, which is worse than not having the step. What CI does instead is keep the chart
+honest: the `helm-chart` job renders it on every push (see below), because an unapplied
+chart's most likely failure is to rot quietly until the day someone needs it. `docker-compose.yml` remains the actual
 "run this platform" mechanism, for local development only (see
 [docs/local-development.md](local-development.md)) — publishing images to GHCR is
 the natural stopping point for a CD pipeline with no real deployment target, and the

@@ -1,0 +1,74 @@
+{{/*
+================================================================================
+HorizontalPodAutoscaler, per service, off by default.
+
+Only three services are intended to carry one -- api-gateway, product-service and
+user-service -- and values.yaml explains per service why the other five do not.
+The short version: inventory-service is bounded by SELECT ... FOR UPDATE on the
+same hot stock rows, so replicas past about three buy lock waits rather than
+throughput; and order-, delivery- and notification-service are bounded by Kafka,
+because no NewTopic bean exists in main code so topics are auto-created at the
+broker default of ONE partition, and no listener sets concurrency -- a second
+replica's consumers are assigned nothing and idle while adding a rebalance pause
+to every scale event. Scaling those is a partition-count change first, and the
+right autoscaler is then KEDA on consumer-group lag rather than CPU, because a
+lagging consumer is not a busy one.
+
+TWO PREREQUISITES THIS OBJECT CANNOT CHECK FOR ITSELF:
+  - metrics-server must be installed, or every HPA sits at <unknown>/60% and
+    never scales;
+  - user-service must have a shared JWT signing key first. The chart DOES check
+    that one and fails the render -- see sdp.validate in _helpers.tpl.
+================================================================================
+*/}}
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- if and $svc.enabled (dig "autoscaling" "enabled" false $svc) }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "sdp.name" (dict "root" $root "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "sdp.name" (dict "root" $root "name" $name) }}
+  # minReplicas 2, not 1: at one replica a node drain is an outage, and the whole
+  # reason to autoscale a service is that its availability matters.
+  minReplicas: {{ $svc.autoscaling.minReplicas }}
+  maxReplicas: {{ $svc.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          # Measured against the REQUEST, not a limit -- there is no CPU limit on
+          # any service in this chart. Utilization above 100% is therefore legal
+          # and expected: it is how a spike is absorbed while the HPA reacts,
+          # rather than being throttled into a p99 cliff.
+          averageUtilization: {{ $svc.autoscaling.targetCPUUtilizationPercentage }}
+  behavior:
+    scaleUp:
+      # No stabilization on the way up: a JVM needs its first ~60s of JIT before
+      # it is fast, so waiting to add capacity means the new pod is still slow by
+      # the time the spike is over.
+      stabilizationWindowSeconds: 0
+      policies:
+        - type: Percent
+          value: 100
+          periodSeconds: 60
+    scaleDown:
+      # Slow to give capacity back, for the same reason: flapping costs the JIT
+      # warm-up twice, and on user-service it also costs a cold JWKS cache.
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Percent
+          value: 50
+          periodSeconds: 120
+{{- end }}
+{{- end }}

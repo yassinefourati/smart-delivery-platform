@@ -147,6 +147,56 @@ jobs:
       - name: Validate compose configuration
         run: docker compose config --quiet
 
+  # There is no cluster to deploy to, so the Helm chart is never applied -- which makes
+  # rot its most likely failure. This job keeps it honest on every push: it must lint,
+  # render with both values files, validate against the real Kubernetes API schemas, and
+  # a deliberately unsafe render must still be REFUSED, so the guard is known to work.
+  # See docs/kubernetes.md and docs/ci-cd.md.
+  helm-chart:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/smart-delivery-platform
+      # helm template has no cluster to ask, and the chart requires >= 1.25.
+      KUBE_VERSION: 1.30.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Lint
+        run: |
+          helm lint "$CHART"
+          helm lint "$CHART" -f "$CHART/values-production.yaml"
+
+      - name: Render
+        run: |
+          helm template sdp "$CHART" --kube-version "$KUBE_VERSION" > rendered-default.yaml
+          helm template sdp "$CHART" --kube-version "$KUBE_VERSION" \
+            -f "$CHART/values-production.yaml" \
+            --set secrets.create=true --set frontend.enabled=true > rendered-full.yaml
+
+      - name: Validate against the Kubernetes API schemas
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          # The Prometheus Operator CRDs (ServiceMonitor, PrometheusRule) publish no schema.
+          ./kubeconform -strict -summary -ignore-missing-schemas \
+            -kubernetes-version "$KUBE_VERSION" rendered-default.yaml rendered-full.yaml
+
+      - name: An unsafe grace period must be refused
+        run: |
+          if helm template sdp "$CHART" --kube-version "$KUBE_VERSION" \
+               --set services.order-service.terminationGracePeriodSeconds=10 >/dev/null 2>guard.err; then
+            echo "::error::the grace-period guard did not fire -- the chart would SIGKILL pods mid-shutdown"
+            exit 1
+          fi
+          grep -q "terminationGracePeriodSeconds is 10" guard.err
+
   # The one job that exercises the platform as a platform: eight services started
   # together, finding each other, sharing a broker, carrying an order across process
   # boundaries. Testcontainers proves each service works against real infrastructure;

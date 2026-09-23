@@ -1,6 +1,12 @@
 spring:
   application:
     name: api-gateway
+  # Kubernetes readiness (Phase 20). Each setting states its reason in a line; the
+  # full argument is docs/kubernetes.md and docs/adr/010-probe-and-lifecycle-contract.md.
+  lifecycle:
+    # Bounds EACH shutdown phase, not the total. The pod's terminationGracePeriodSeconds
+    # must cover preStop + 2 x this, and the Helm chart refuses to render if it does not.
+    timeout-per-shutdown-phase: ${SHUTDOWN_PHASE_TIMEOUT:15s}
   cloud:
     gateway:
       server:
@@ -8,6 +14,12 @@ spring:
           httpclient:
             connect-timeout: 3000
             response-timeout: 5s
+            # Bound idle and lifetime so the gateway never writes a request onto a pooled
+            # connection to a pod that is shutting down; Reactor Netty leaves both unbounded.
+            pool:
+              max-idle-time: ${GATEWAY_POOL_MAX_IDLE_TIME:8s}
+              max-life-time: ${GATEWAY_POOL_MAX_LIFE_TIME:60s}
+              eviction-interval: ${GATEWAY_POOL_EVICTION_INTERVAL:2s}
           routes:
             - id: user-service
               # /.well-known/jwks.json is routed here too (ADR 007): it is a public
@@ -91,6 +103,8 @@ spring:
 
 server:
   port: 8080
+  # Boot 3.5's default already; stated because the grace-period arithmetic depends on it.
+  shutdown: graceful
 
 # One Swagger UI for the whole platform, at http://localhost:8080/swagger-ui.html, with a
 # dropdown to switch between services -- see docs/api-documentation.md. Each service still
@@ -128,6 +142,19 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Two probe groups for the kubelet, with no shared dependency in either (ADR 010).
+      # /actuator/health is unchanged and still aggregates db, Kafka and Redis.
+      probes:
+        enabled: true
+      group:
+        # Liveness: is this JVM wedged? Never Postgres, Kafka or Redis -- a shared outage
+        # must not restart every replica at once.
+        liveness:
+          include: livenessState
+        readiness:
+          # Readiness: can this instance take traffic? Shared dependencies are deliberately
+          # excluded; ADR 010 records which failure that choice accepts.
+          include: readinessState
   metrics:
     distribution:
       percentiles-histogram:

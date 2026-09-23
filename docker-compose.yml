@@ -96,6 +96,13 @@ services:
       context: .
       dockerfile: api-gateway/Dockerfile
     container_name: sdp-api-gateway
+    # Matches this service's Kubernetes memory request/limit, and it has to be here for
+    # the image's JAVA_OPTS to mean anything: -XX:MaxRAMPercentage is a percentage OF THE
+    # CGROUP LIMIT, and with no limit set the JVM reads the host's RAM instead -- so eight
+    # containers would each size a heap from the whole laptop. Limits, not reservations:
+    # Linux only backs heap pages when they are touched, so a service that uses 400MB
+    # shows 400MB in `docker stats` whatever this says.
+    mem_limit: 1g
     ports:
       - "8080:8080"
     environment:
@@ -133,6 +140,8 @@ services:
       context: .
       dockerfile: user-service/Dockerfile
     container_name: sdp-user-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8081:8081"
     environment:
@@ -171,6 +180,8 @@ services:
       context: .
       dockerfile: product-service/Dockerfile
     container_name: sdp-product-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 1g
     ports:
       - "8082:8082"
     environment:
@@ -202,6 +213,8 @@ services:
       context: .
       dockerfile: inventory-service/Dockerfile
     container_name: sdp-inventory-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8083:8083"
     environment:
@@ -230,6 +243,8 @@ services:
       context: .
       dockerfile: order-service/Dockerfile
     container_name: sdp-order-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 1g
     ports:
       - "8084:8084"
     environment:
@@ -272,6 +287,8 @@ services:
       context: .
       dockerfile: payment-service/Dockerfile
     container_name: sdp-payment-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8085:8085"
     environment:
@@ -300,6 +317,8 @@ services:
       context: .
       dockerfile: delivery-service/Dockerfile
     container_name: sdp-delivery-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8086:8086"
     environment:
@@ -328,6 +347,8 @@ services:
       context: .
       dockerfile: notification-service/Dockerfile
     container_name: sdp-notification-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 512m
     ports:
       - "8087:8087"
     environment:

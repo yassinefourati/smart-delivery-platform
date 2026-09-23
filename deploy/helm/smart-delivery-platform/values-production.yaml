@@ -1,0 +1,197 @@
+# =============================================================================
+# values-production.yaml -- the second half of values.yaml, not an example
+# =============================================================================
+# values.yaml is a single-replica install with every optional object off, so that
+# the first thing an operator does is get eight pods running without an HPA, a
+# PDB, a topology constraint or a CRD-dependent object failing for a reason
+# unrelated to the platform. This file is the other shape: two replicas, the three
+# autoscalers that are actually justified, and the objects a real environment
+# needs.
+#
+#   helm upgrade --install sdp deploy/helm/smart-delivery-platform \
+#     --namespace smart-delivery --create-namespace \
+#     -f deploy/helm/smart-delivery-platform/values-production.yaml \
+#     -f my-environment.yaml
+#
+# The second -f is not optional: every REPLACE_ME below has to come from somewhere,
+# and it should not be a file in this repository.
+#
+# LIKE THE REST OF THIS CHART, NONE OF THIS HAS EVER RUN. See README.md.
+# =============================================================================
+
+image:
+  # NOT `latest`. CI publishes :<commit-sha> for every build, and that is the only
+  # tag that lets you read what is running off the manifest, roll back to a known
+  # artifact, and have `helm rollback` mean something. `latest` makes two installs
+  # a week apart run different code under one name.
+  tag: "REPLACE_ME_COMMIT_SHA"
+  pullSecrets: []
+    # - name: ghcr
+
+common:
+  kafkaBootstrapServers: "REPLACE_ME_KAFKA_BOOTSTRAP:9092"
+  publicGatewayUrl: "https://REPLACE_ME_PUBLIC_HOST"
+  otlpTracingEndpoint: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
+
+database:
+  # Lowered from 5 because the HPAs below raise the CEILING this has to be sized
+  # against, and the ceiling is what matters -- the connections are taken when the
+  # autoscaler scales, not when somebody reviews the values file.
+  #
+  #   user-service      maxReplicas 6
+  #   product-service   maxReplicas 8
+  #   inventory, order, payment, delivery   2 each
+  #   ---------------------------------------------
+  #   22 pods x 4 = 88 connections
+  #
+  # 88 fits even a stock max_connections of 100. At HikariCP's untuned default of
+  # 10 the same topology would want 220, and the service that lost the race would
+  # not degrade -- it would fail to start, because Flyway could not get a
+  # connection.
+  #
+  # This arithmetic assumes all six databases live on ONE Postgres instance, which
+  # is the conservative case. Six separate instances (or a managed service per
+  # service) means only the per-service figure matters, and this can go back up.
+  poolMax: 4
+  # A managed instance is usually configured well above the container default.
+  maxConnectionsBudget: 200
+
+# Every service gets a second replica except user-service, which needs one more
+# thing first -- see below. Two replicas is the point of this whole phase: it is
+# what makes a node drain, a rolling deploy and a single pod failure survivable.
+services:
+  api-gateway:
+    replicaCount: 2
+    autoscaling:
+      enabled: true
+  user-service:
+    # THIS IS AN ASSERTION THE OPERATOR MAKES, and the chart trusts it: it means a
+    # single shared JWT_PRIVATE_KEY Secret genuinely exists and every replica reads
+    # it. Setting secrets.jwtSigningKeyProvisioned=true without that is how you get
+    # intermittent platform-wide 401s that surface on the dashboard as
+    # inventory-service being down. The chart's guard is the last thing standing
+    # between those two states.
+    replicaCount: 2
+    autoscaling:
+      enabled: true
+    config:
+      # A real generation label, never the sdp-dev-key-1 default: the kid is
+      # stamped into every token's header, and a kid must name ONE piece of key
+      # material forever.
+      JWT_SIGNING_KID: "sdp-REPLACE_ME_YYYY_MM_a"
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_USER_HOST:5432/user_db?sslmode=require"
+  product-service:
+    replicaCount: 2
+    autoscaling:
+      enabled: true
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_PRODUCT_HOST:5432/product_db?sslmode=require"
+      REDIS_HOST: "REPLACE_ME_REDIS_HOST"
+      REDIS_PORT: "6379"
+  inventory-service:
+    # No HPA: throughput is bounded by SELECT ... FOR UPDATE on the same hot stock
+    # rows, so replicas past about three buy lock waits rather than throughput.
+    replicaCount: 2
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_INVENTORY_HOST:5432/inventory_db?sslmode=require"
+  order-service:
+    # No HPA: its consumers are capped at one partition (no NewTopic bean exists,
+    # no listener sets concurrency), and a CPU autoscaler would flap against the
+    # reaper's once-a-minute burst. Two replicas here buy availability and outbox
+    # continuity, not throughput -- which is the honest description of what
+    # replicas do for every outbox service.
+    replicaCount: 2
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_ORDER_HOST:5432/order_db?sslmode=require"
+  payment-service:
+    replicaCount: 2
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_PAYMENT_HOST:5432/payment_db?sslmode=require"
+  delivery-service:
+    replicaCount: 2
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_DELIVERY_HOST:5432/delivery_db?sslmode=require"
+  notification-service:
+    # Two replicas is honestly a little dishonest here: with one partition per
+    # topic the second replica's consumers are assigned nothing and simply idle. It
+    # is kept at 2 so a node drain does not stop notifications entirely, and it is
+    # the one place in this file where the second replica is for availability and
+    # NOTHING else. Raise the partition count before expecting anything more.
+    replicaCount: 2
+
+# At two replicas each, the four outbox services poll at 2000 x 2 = 4000ms, which
+# keeps the fleet's claim-query load, per-aggregate latency and total throughput
+# identical to a single replica (ADR 006). Left as the default; set
+# scalePollInterval=false to buy throughput and pay for it in database load
+# deliberately.
+outbox:
+  scalePollInterval: true
+
+secrets:
+  create: false
+  jwtSigningKeyProvisioned: true
+
+podDisruptionBudget:
+  # Safe now that everything is at two or more replicas. The chart still skips any
+  # service whose floor is one, so this cannot hang a node drain by itself.
+  enabled: true
+  maxUnavailable: 1
+
+topologySpread:
+  enabled: true
+  # Still ScheduleAnyway. DoNotSchedule on a cluster with fewer nodes than replicas
+  # leaves pods Pending forever, and nothing about a production label makes a
+  # three-node cluster bigger.
+  whenUnsatisfiable: ScheduleAnyway
+  zoneSpread: true
+
+observability:
+  serviceMonitor:
+    enabled: true
+    extraLabels:
+      # MUST match the Prometheus CR's spec.serviceMonitorSelector, or this object
+      # is silently ignored: no error, no target, a blank dashboard. Check
+      # Prometheus /targets on the first apply, before trusting any panel.
+      release: REPLACE_ME_KUBE_PROMETHEUS_STACK_RELEASE
+  prometheusRule:
+    enabled: true
+    extraLabels:
+      release: REPLACE_ME_KUBE_PROMETHEUS_STACK_RELEASE
+
+networkPolicy:
+  # Read the comment in values.yaml before enabling this. It is not additive: a
+  # NetworkPolicy that selects a pod denies every ingress it does not name, so the
+  # object has to allow the scrape AND all in-namespace traffic, which is what the
+  # chart's version does.
+  enabled: true
+  monitoringNamespace: REPLACE_ME_MONITORING_NAMESPACE
+  ingressControllerNamespace: REPLACE_ME_INGRESS_NAMESPACE
+
+ingress:
+  enabled: true
+  className: REPLACE_ME_INGRESS_CLASS
+  # Must equal the host in common.publicGatewayUrl above.
+  host: REPLACE_ME_PUBLIC_HOST
+  tls:
+    enabled: true
+    secretName: REPLACE_ME_TLS_SECRET
+  exposeJwks: true
+  # Still off. Publishing a complete, accurate description of every endpoint in the
+  # platform to the internet is a decision; `kubectl port-forward` covers the
+  # people who need it.
+  exposeSwaggerUi: false
+
+frontend:
+  # Flip to true once an image exists. CI's docker-build matrix covers the eight
+  # Java services only, so nothing publishes one yet, and the contract the image
+  # has to satisfy is written at the top of templates/frontend.yaml.
+  enabled: false
+  replicaCount: 2
+  image:
+    tag: REPLACE_ME_COMMIT_SHA
+  # No config block: the SPA needs no runtime configuration at all. Its API base path
+  # is a build-time value that is "" in every environment, and every URL it builds is
+  # relative -- which works only because this release serves it from the same origin
+  # as the gateway (see ingress.host above).
+  podDisruptionBudget:
+    enabled: true

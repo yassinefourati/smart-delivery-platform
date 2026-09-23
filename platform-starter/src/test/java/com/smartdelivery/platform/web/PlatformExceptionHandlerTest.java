@@ -108,6 +108,35 @@ class PlatformExceptionHandlerTest {
                 .andExpect(jsonPath("$.correlationId").exists());
     }
 
+    /**
+     * Found by stopping Postgres under the running services (Phase 20): every
+     * database-backed request was a 500 INTERNAL_ERROR. An unreachable database is
+     * temporary and retryable -- a 503 -- and both ways Spring surfaces it must map.
+     */
+    @Test
+    void anUnreachableDatabaseIsServiceUnavailableNotAnInternalError() throws Exception {
+        mockMvc.perform(get("/probe/db-down-in-transaction"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error").value("SERVICE_UNAVAILABLE"))
+                .andExpect(jsonPath("$.correlationId").exists());
+
+        mockMvc.perform(get("/probe/db-down-outside-transaction"))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error").value("SERVICE_UNAVAILABLE"));
+    }
+
+    /**
+     * The 503 mapping is deliberately narrow. A constraint violation or a bad query is a
+     * real bug, and must stay a 500 -- mapping all of DataAccessException to 503 would tell
+     * clients to retry something that will fail identically forever.
+     */
+    @Test
+    void aGenuineDataBugStaysAnInternalError() throws Exception {
+        mockMvc.perform(get("/probe/constraint-violation"))
+                .andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.error").value("INTERNAL_ERROR"));
+    }
+
     /** Every response carries the request's own path, whichever handler produced it. */
     @Test
     void everyBodyCarriesTheRequestPath() throws Exception {
@@ -164,6 +193,23 @@ class PlatformExceptionHandlerTest {
         @GetMapping("/probe/boom")
         String boom() {
             throw new IllegalStateException("a database password, probably");
+        }
+
+        @GetMapping("/probe/db-down-in-transaction")
+        String dbDownInTransaction() {
+            throw new org.springframework.transaction.CannotCreateTransactionException(
+                    "Could not open JPA EntityManager for transaction",
+                    new java.sql.SQLTransientConnectionException("Connection is not available, request timed out after 2000ms"));
+        }
+
+        @GetMapping("/probe/db-down-outside-transaction")
+        String dbDownOutsideTransaction() {
+            throw new org.springframework.jdbc.CannotGetJdbcConnectionException("Failed to obtain JDBC Connection");
+        }
+
+        @GetMapping("/probe/constraint-violation")
+        String constraintViolation() {
+            throw new org.springframework.dao.DataIntegrityViolationException("duplicate key value violates unique constraint");
         }
 
         @GetMapping("/probe/domain")

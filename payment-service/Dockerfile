@@ -22,10 +22,26 @@ RUN --mount=type=cache,target=/root/.m2 \
     mvn -B -pl payment-service -am -DskipTests package
 
 FROM eclipse-temurin:21-jre-alpine
-RUN addgroup -S spring && adduser -S spring -G spring
+# A numeric UID, because under runAsNonRoot the kubelet can only verify a numeric USER --
+# `USER spring` would stop every pod from starting. See docs/kubernetes.md.
+RUN addgroup -g 1000 -S spring && adduser -u 1000 -S spring -G spring
 WORKDIR /app
-COPY --from=build /workspace/payment-service/target/*.jar app.jar
-RUN chown spring:spring app.jar
-USER spring:spring
+
+# Root-owned and read-only. The chown this replaced rewrote the jar into a second layer,
+# so every published image carried two copies of it (96MB on order-service).
+COPY --from=build /workspace/payment-service/target/*.jar /app/app.jar
+
+USER 1000:1000
 EXPOSE 8085
-ENTRYPOINT ["java", "-jar", "/app/app.jar"]
+
+# JVM flags. Why a heap percentage rather than -Xmx, why not the usual 75%, and why the
+# `exec` is load-bearing (the JVM must be PID 1 or SIGTERM never reaches it, and graceful
+# shutdown never runs) are in docs/kubernetes.md. JAVA_OPTS replaces this set;
+# JAVA_OPTS_APPEND adds to it and wins on any flag it repeats, with no rebuild.
+#
+# This service specifically:
+#   60% of a 768Mi limit. The provider behind it is a mock, so this sizing is for the
+#   Spring/Hibernate/Kafka floor rather than for anything the service itself does; a
+#   real payment client with its own connection pool would want revisiting.
+ENV JAVA_OPTS="-XX:InitialRAMPercentage=60.0 -XX:MaxRAMPercentage=60.0 -XX:MaxMetaspaceSize=256m -XX:+UseG1GC -XX:+ExitOnOutOfMemoryError"
+ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS $JAVA_OPTS_APPEND -jar /app/app.jar"]

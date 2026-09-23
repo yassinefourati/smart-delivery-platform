@@ -7,9 +7,11 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
+import org.springframework.dao.DataAccessResourceFailureException;
 import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.security.access.AccessDeniedException;
 import org.springframework.security.core.AuthenticationException;
+import org.springframework.transaction.CannotCreateTransactionException;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -103,6 +105,43 @@ public abstract class PlatformExceptionHandler {
         log.debug("No handler for {} {}", request.getMethod(), request.getRequestURI());
         return build(HttpStatus.NOT_FOUND, "NOT_FOUND", "No endpoint %s %s".formatted(
                 request.getMethod(), request.getRequestURI()), request);
+    }
+
+    /**
+     * The database is unreachable: a 503, not a 500. Found by stopping Postgres under the
+     * running services while verifying the Kubernetes probe design (Phase 20) -- every
+     * database-backed request came back as a 500 INTERNAL_ERROR with a full stack trace
+     * logged at ERROR.
+     *
+     * Both halves were wrong. A 500 tells a client "this is a bug, do not bother retrying";
+     * an unreachable database is the textbook 503 -- temporary, and safe to retry, which is
+     * exactly what the frontend does with SERVICE_UNAVAILABLE. And one stack trace per
+     * request during an outage buries the single line that says what actually happened.
+     *
+     * It fails in about two seconds rather than thirty because of
+     * spring.datasource.hikari.connection-timeout (docs/kubernetes.md) -- and that bound is
+     * what keeps the request threads free to answer the kubelet's probes while this is
+     * going on. The liveness probe stays UP throughout, so no pod is restarted over it;
+     * that is ADR 010's whole point.
+     *
+     * CannotCreateTransactionException is what a @Transactional method throws when it
+     * cannot get a connection to begin; DataAccessResourceFailureException (including
+     * CannotGetJdbcConnectionException) is what a repository call outside a transaction
+     * throws. Deliberately NOT the broader DataAccessException: a constraint violation or a
+     * bad query is a real bug, and it should stay a 500 with its stack trace.
+     */
+    @ExceptionHandler({CannotCreateTransactionException.class, DataAccessResourceFailureException.class})
+    public ResponseEntity<ProblemDetail> handleDatabaseUnavailable(Exception ex, HttpServletRequest request) {
+        // WARN with the root cause's message and no stack trace: the cause is the useful
+        // part ("Connection to localhost:5432 refused"), and it is the same on every request.
+        Throwable root = ex;
+        while (root.getCause() != null && root.getCause() != root) {
+            root = root.getCause();
+        }
+        log.warn("Database unavailable while processing {} {}: {}",
+                request.getMethod(), request.getRequestURI(), root.getMessage());
+        return build(HttpStatus.SERVICE_UNAVAILABLE, "SERVICE_UNAVAILABLE",
+                "The service's database is temporarily unavailable; please retry", request);
     }
 
     @ExceptionHandler(AuthenticationException.class)

@@ -1,0 +1,1721 @@
+# =============================================================================
+# smart-delivery-platform -- default values
+# =============================================================================
+# These defaults describe a SINGLE-REPLICA install with every optional object
+# switched off: no HPA, no PodDisruptionBudget, no topologySpreadConstraints, no
+# Ingress, no ServiceMonitor, no PrometheusRule, no NetworkPolicy. That is
+# deliberate -- the thing an operator does first is get eight pods running, and
+# every one of those objects is a way for that to fail for a reason unrelated to
+# the platform (a PDB on a single replica that blocks a node drain forever, a
+# topology constraint that leaves pods Pending on a one-node cluster, a
+# ServiceMonitor whose selector does not match the Prometheus CR).
+#
+# values-production.yaml next to this file turns them on and carries the
+# reasoned numbers -- two replicas, the three HPAs, the poll-interval scaling.
+# Read it as the second half of this file rather than as an example.
+#
+# TWO RULES FOR EDITING THIS FILE
+#
+#   1. QUOTE EVERY VALUE THAT LANDS IN A ConfigMap. ConfigMap data must be
+#      strings, and the templates render `| quote`. An unquoted 10000.00 is
+#      parsed by YAML as a float and rendered as "10000"; an unquoted 8084 in a
+#      config map becomes "8084" harmlessly, but 1e3 or 0777 will surprise you.
+#      Quote it and there is nothing to think about.
+#
+#   2. THERE IS NO REAL CREDENTIAL IN THIS FILE OR ANY FILE IN THIS CHART, and
+#      there must never be one. Every placeholder is spelled REPLACE_ME so that
+#      `grep -r REPLACE_ME` finds all of them before an install. Secrets are
+#      created out of band (see `secrets:` below and NOTES.txt).
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# naming
+# -----------------------------------------------------------------------------
+naming:
+  # Prepended to every object name. EMPTY BY DEFAULT, which breaks the usual Helm
+  # convention of prefixing everything with the release name, and it is a
+  # deliberate trade rather than an oversight.
+  #
+  # The Prometheus Operator derives the `job` label from the SERVICE NAME. Every
+  # one of the 15 panels in infrastructure/grafana/dashboards/platform-overview.json
+  # aggregates `by (job)` with a `{{job}}` legend, and the eight job_name values in
+  # infrastructure/prometheus/prometheus.yml are the bare service names. So a
+  # Service called `sdp-prod-order-service` renames every legend on that dashboard
+  # and the dashboard silently stops matching the platform it is pointed at.
+  #
+  # The cost of the empty default, stated plainly: object names are fixed, so TWO
+  # RELEASES OF THIS CHART CANNOT COEXIST IN ONE NAMESPACE. Install a second one
+  # into its own namespace, or set a prefix here and accept that the `job` label
+  # changes with it. The chart's own PrometheusRule builds its job regex from this
+  # prefix, so the alerts follow automatically; the Grafana dashboard JSON does
+  # not, and would have to be edited.
+  prefix: ""
+
+# -----------------------------------------------------------------------------
+# image
+# -----------------------------------------------------------------------------
+image:
+  # Matches what .github/workflows/ci.yml publishes:
+  #   ghcr.io/<owner>/<repo>/<service>:{latest,<commit-sha>}
+  registry: ghcr.io
+  repository: yassinefourati/smart-delivery-platform
+  # Empty means "use .Chart.AppVersion". Set this to a commit sha for any install
+  # that matters -- see the comment on appVersion in Chart.yaml.
+  tag: ""
+  pullPolicy: IfNotPresent
+  # GHCR packages are private unless somebody made them public. A private package
+  # needs a docker-registry Secret here, or every pod sits in ImagePullBackOff:
+  #   kubectl -n <ns> create secret docker-registry ghcr \
+  #     --docker-server=ghcr.io --docker-username=<user> --docker-password=<PAT>
+  pullSecrets: []
+  #  - name: ghcr
+
+# -----------------------------------------------------------------------------
+# common -- the values that MUST be byte-identical in all eight services
+# -----------------------------------------------------------------------------
+# Rendered into one ConfigMap (`sdp-common`) that every Deployment consumes with
+# envFrom. JWT_ISSUER and JWT_AUDIENCE are minted by user-service and validated
+# as claims by six resource servers: one character of difference between two
+# copies is a 401 on every request, with nothing in either service's log that
+# says "mismatch". Eight per-service copies of that pair is how one of them
+# eventually drifts. This is the same argument ADR 009 makes for platform-starter
+# -- shared infrastructure where divergence is a bug, not a design choice.
+#
+# The accepted cost: envFrom injects values a pod does not read (api-gateway gets
+# KAFKA_BOOTSTRAP_SERVERS, notification-service gets the six service URIs).
+# Harmless, because Spring binds only what its own application.yml references,
+# but `kubectl exec -- env` is noisier than docker-compose.yml's per-service
+# environment blocks were.
+common:
+  # Both names on purpose, and this one is worth understanding before changing.
+  #
+  # The last `---` document in all eight application.yml files is activated
+  # `on-profile: docker` and its only content is
+  # `logging.structured.format.console: ecs` -- the ECS JSON logging that
+  # docs/observability.md is built on. Phase 20 widens that activation to the
+  # profile expression "docker | kubernetes" so a cluster can say `kubernetes`
+  # honestly. Activating BOTH names means the JSON logging is on whether or not
+  # that widening has landed yet, and stays on if a future `kubernetes`-only
+  # document is added. The failure this avoids is the quiet one: a single wrong
+  # profile name does not error, it just turns structured logging off and leaves
+  # plain text going to a log aggregator that cannot parse it.
+  springProfiles: "docker,kubernetes"
+
+  # An OTel Collector, not Tempo directly, and an FQDN, not a bare name. Copying
+  # docker-compose's `http://tempo:4318/v1/traces` here is the trap: a bare
+  # `tempo` resolves only inside the pod's own namespace, so from this namespace
+  # it resolves to nothing, the OTLP exporter logs and drops, the services keep
+  # serving, and Tempo is simply empty with nothing to explain it.
+  #
+  # The Collector is where actuator spans get filtered and tail sampling happens.
+  # Services keep management.tracing.sampling.probability at 1.0, which is only
+  # defensible WITH that filtering -- kubelet probes liveness and readiness every
+  # ~10s per pod and Prometheus scrapes every 15s, so on a quiet cluster probe
+  # traffic is the majority of root spans. With no Collector in front of Tempo,
+  # set MANAGEMENT_TRACING_SAMPLING_PROBABILITY=0.1 per service (see
+  # `services.<name>.extraEnv`) rather than raising this endpoint's load.
+  otlpTracingEndpoint: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
+
+  # A managed broker's bootstrap endpoint, or a Strimzi bootstrap Service such as
+  # `sdp-kafka-bootstrap.kafka.svc.cluster.local:9092`. This chart does not run a
+  # broker -- see README.md.
+  #
+  # NOT YET BINDABLE, flagged rather than invented: nothing in this platform
+  # configures Kafka SASL or TLS. A broker that requires authentication needs
+  # spring.kafka.security.protocol and spring.kafka.properties.sasl.* added to
+  # the services' application.yml first. Setting a KAFKA_PASSWORD-shaped env var
+  # here would be silently ignored and the failure would look like a connection
+  # refusal.
+  kafkaBootstrapServers: "REPLACE_ME_KAFKA_BOOTSTRAP:9092"
+
+  # Identifiers, not URLs that anything resolves (see user-service's
+  # application.yml). Left at the local defaults deliberately: changing them
+  # invalidates nothing, but it does force all seven verifiers to change in the
+  # same breath, so there is no reason to change them without one.
+  jwtIssuer: "https://user-service.smart-delivery.local"
+  jwtAudience: "smart-delivery-platform"
+
+  # What Swagger UI's "Try it out" calls, and what the aggregated API docs
+  # advertise as the platform's address. MUST be the public Ingress host, and the
+  # same host the React app is served from -- there is no CORS configuration
+  # anywhere in this repository (the single hit for "cors" is a comment in
+  # api-gateway's application.yml noting that the Swagger UI urls are relative so
+  # "there is no CORS configuration to get wrong"), so a cross-origin frontend
+  # would need CORS added to the gateway: a code change plus a new allowed-origins
+  # env var, plus a preflight failure mode that looks like the API being down.
+  publicGatewayUrl: "https://REPLACE_ME_PUBLIC_HOST"
+
+  # JWT_JWK_SET_URI and the six *_SERVICE_URI values are NOT listed here: the
+  # templates build them from the service names, this namespace and each
+  # service's port, so they cannot drift from the Services the chart itself
+  # creates. This answers the service-discovery question docs/architecture.md
+  # left open, the way that document predicted -- "moving to Kubernetes Services,
+  # which give this for free". No Eureka, no Consul, and the env var names are
+  # exactly the ones already in the application.yml files.
+  #
+  # Override one only to point a service at something outside this release:
+  #   serviceUriOverrides:
+  #     PAYMENT_SERVICE_URI: "http://payments.legacy.svc.cluster.local:8085"
+  serviceUriOverrides: {}
+
+  # Anything else that must reach all eight pods. Keys go into sdp-common as-is,
+  # and must be quoted strings.
+  #
+  # The one worth knowing about: if there is NO OTel Collector and the services
+  # export straight to Tempo, turn head sampling down here rather than leaving it at
+  # the application default of 1.0 --
+  #
+  #   extraEnv:
+  #     MANAGEMENT_TRACING_SAMPLING_PROBABILITY: "0.1"
+  #
+  # -- because with no Collector to filter them, kubelet probes and Prometheus
+  # scrapes become the majority of root spans on a quiet cluster, multiplied by the
+  # replica count. No code change is needed: Spring's relaxed binding already reads
+  # that name onto management.tracing.sampling.probability, and there is deliberately
+  # no second ${...} placeholder for it in the application.yml files -- one knob
+  # should not have two names.
+  #
+  # Note Boot's sampler is ParentBased, so api-gateway's ratio decides most traces
+  # for the whole platform; Kafka listeners and the outbox poller start their own
+  # traces and are governed by their own service's ratio. Setting it here covers both
+  # because this map reaches all eight.
+  extraEnv: {}
+
+# -----------------------------------------------------------------------------
+# database -- knobs shared by the six schema-owning services
+# -----------------------------------------------------------------------------
+# DB_URL is per service (under `services.<name>.config`), because each service
+# owns its own database (ADR 001). Everything here is identical across the six
+# and is rendered into each of their ConfigMaps from this one place.
+database:
+  # THE CEILING THAT ARRIVES BEFORE CPU DOES. Six schema-owning services times
+  # HikariCP's default pool of 10 times two replicas is 120 connections against
+  # postgres:17-alpine's default max_connections of 100 -- and the service that
+  # loses the race does not degrade, it fails to start, because Flyway cannot get
+  # a connection. 5 x 6 x 2 = 60 fits with room for psql, a backup job and an
+  # operator's own connections.
+  #
+  # This is set here rather than in application.yml because Spring's relaxed
+  # binding reads spring.datasource.hikari.* from the environment whether or not
+  # application.yml declares it -- so the chart can fix the ceiling without a
+  # code change. The digest for this phase listed it as a prerequisite "outside
+  # this task's paths"; an env var is not outside the chart's paths.
+  poolMax: 5
+
+  # MILLISECONDS, not a Duration -- this binds onto HikariConfig.setConnectionTimeout(long),
+  # so "2s" would fail to bind where "2000" works.
+  #
+  # This is the chart's answer to the highest-severity problem in this phase's
+  # review, and it is worth the paragraph. Both probe groups are served by the
+  # application's own Tomcat thread pool (nothing in this repository sets
+  # management.server.port). So "is this JVM able to answer at all" is NOT
+  # independent of Postgres: it is coupled to it through the request threads.
+  # With the default 30s connection-timeout against a saturated pool, a slow
+  # database parks Tomcat's 200 workers in HikariPool.getConnection(), the
+  # kubelet's probe is accepted at the socket and never dispatched, it blows
+  # timeoutSeconds, and every replica of every schema-owning service fails
+  # liveness in the same tick -- which is precisely the platform-wide restart
+  # storm that keeping `db` out of the probe groups was supposed to prevent.
+  # Removing the health indicator removed the cheap dependency check and left the
+  # expensive coupling in place.
+  #
+  # 2000ms makes a saturated pod SHED load instead of accumulating threads: a
+  # request that cannot get a connection in two seconds fails fast with the
+  # platform's own 503-plus-correlation-id error contract, the worker returns to
+  # the pool, and there is a thread free to answer the probe. It trades some
+  # requests that would have succeeded after a long wait for a pod that stays
+  # diagnosable and stays alive.
+  #
+  # The real fix is a separate management connector (see `managementPort` under
+  # each service), which needs a property this platform does not set yet.
+  connectionTimeoutMs: "2000"
+
+  # Informational only -- NOTES.txt uses it to print the connection arithmetic
+  # above against whatever replica counts are actually configured.
+  maxConnectionsBudget: 100
+
+  # Flyway settings that only matter under Kubernetes. Compose hides both behind
+  # `depends_on: condition: service_healthy`; a Pod is scheduled the moment a node
+  # has room for it, whether or not Postgres is accepting connections.
+  flyway:
+    # Flyway's own default is 0 retries, so a database five seconds behind the pod
+    # is a failed context refresh, a non-zero exit, and CrashLoopBackOff whose
+    # exponential backoff then costs minutes for a pod that was forty seconds from
+    # ready. This loop is what replaces depends_on, and it covers the whole
+    # application rather than just Flyway: the EntityManagerFactory is built after
+    # the Flyway initializer, so by the time Hibernate asks for a connection
+    # Flyway has already established that Postgres answers.
+    #
+    # 60 x 1s = 60s of patience. Boot's default connect-retries-interval is 120s,
+    # so the interval MUST be set alongside the count or "60 retries" means two
+    # hours. Long enough to ride out a Postgres failover, short enough that a
+    # genuinely wrong DB_URL still fails inside one startupProbe budget instead of
+    # looking like a slow boot.
+    connectRetries: "60"
+    connectRetriesInterval: "1s"
+    # What makes N replicas booting together safe, and it is Postgres-specific:
+    # before Flyway reads a script -- before it creates flyway_schema_history,
+    # since that creation is itself wrapped in the same lock -- it takes a 64-bit
+    # advisory lock, pg_try_advisory_xact_lock(). The replica that loses the race
+    # never applies a migration twice; it retries the try-lock once a second, this
+    # many times, and then THROWS. At the default of 50 that is a ~50 second
+    # cliff: a migration slower than that puts every sibling replica into
+    # CrashLoopBackOff while the winner finishes. Old pods keep serving, so the
+    # symptom is a stalled rollout that looks exactly like a broken one.
+    #
+    # -1 means retry indefinitely, bounded instead by the startupProbe (300s) and
+    # then by progressDeadlineSeconds. That is the right bound: the pod that is
+    # waiting is doing the correct thing, and the thing that should decide it has
+    # waited too long is the rollout, not Flyway.
+    lockRetryCount: "-1"
+
+# -----------------------------------------------------------------------------
+# outbox -- identical in the four services that publish through it
+# -----------------------------------------------------------------------------
+outbox:
+  # OUTBOX_POLL_INTERVAL_MS is COMPUTED, not listed: basePollIntervalMs x the
+  # service's replica count, when scalePollInterval is true.
+  #
+  # The reasoning falls straight out of ADR 006's model. Every replica runs the
+  # claim query on its own timer, and that query is not cheap (FOR UPDATE SKIP
+  # LOCKED with a correlated NOT EXISTS for oldest-per-aggregate). At a fixed 2s
+  # interval, R replicas means R times the database load for identical
+  # throughput, because the batch size is per poll. Scaling the interval with the
+  # replica count keeps the effective per-aggregate poll rate at one every 2s
+  # across the fleet: same database load, same per-aggregate latency, same total
+  # throughput (R x 50 rows per 2R seconds == 50 rows per 2s).
+  #
+  # Which is the honest conclusion, and it is worth saying out loud: REPLICAS BUY
+  # THE OUTBOX AVAILABILITY, NOT THROUGHPUT. To buy throughput, set
+  # scalePollInterval to false and pay for it in database load deliberately.
+  basePollIntervalMs: 2000
+  scalePollInterval: true
+  # The remaining seven values, identical in inventory-, order-, payment- and
+  # delivery-service. All of these jobs claim rows with FOR UPDATE SKIP LOCKED and
+  # lease by updated_at (ADR 006, ADR 008), so they are already safe with N
+  # replicas: no leader election, no ShedLock, and adding either would be a
+  # regression.
+  env:
+    OUTBOX_BATCH_SIZE: "50"
+    OUTBOX_INITIAL_BACKOFF: "2s"
+    OUTBOX_MAX_BACKOFF: "5m"
+    OUTBOX_RETENTION: "7d"
+    OUTBOX_CLEANUP_INTERVAL_MS: "3600000"
+    OUTBOX_CLEANUP_BATCH_SIZE: "500"
+    OUTBOX_CLEANUP_MAX_BATCHES_PER_RUN: "20"
+
+# -----------------------------------------------------------------------------
+# migrations
+# -----------------------------------------------------------------------------
+migrations:
+  # "startup" is the only accepted value, and the chart fails the render on
+  # anything else rather than silently ignoring it.
+  #
+  # Flyway stays where it is: in the application, during context refresh. It is
+  # not unsafe with N replicas (see database.flyway.lockRetryCount above), and it
+  # gives readiness gating for free and by construction rather than by
+  # configuration -- Spring wires every @DependsOnDatabaseInitialization bean,
+  # the EntityManagerFactory included, behind the Flyway initializer, so the
+  # order is Flyway, then ddl-auto: validate, then the web server binds, then
+  # Actuator answers. There is NO WINDOW in which a pod is Ready against an
+  # unmigrated schema.
+  #
+  # A "preUpgradeJob" strategy is not offered because it cannot work with these
+  # images today, and offering a broken option is worse than offering none. It
+  # needs a migrate-and-exit mode, and FLYWAY_ENABLED=false is only half of one:
+  # four of the six schema-owning services carry @EnableScheduling, Spring's
+  # ThreadPoolTaskScheduler threads are non-daemon, and there is no
+  # spring.task.scheduling.enabled property in Boot 3.5 -- so a same-image
+  # "migrate" pod would migrate and then sit there forever, the Job would never
+  # complete, it would hit activeDeadlineSeconds, be marked Failed, and fail the
+  # helm upgrade. README.md records the four triggers that make building that
+  # mode worth it; the likeliest to fire first is somebody being on the hook for
+  # least-privilege database access, since startup-Flyway means the application's
+  # own DB role holds DDL rights permanently.
+  strategy: startup
+
+# -----------------------------------------------------------------------------
+# secrets
+# -----------------------------------------------------------------------------
+secrets:
+  # false by default, and the default is the recommendation. The chart does not
+  # want to be in the business of holding credentials: `create: true` renders
+  # Secrets full of REPLACE_ME placeholders, which is useful for seeing the shape
+  # of what is needed and useless for running anything, because Postgres will
+  # reject them.
+  #
+  # Create them out of band instead (NOTES.txt prints the commands), or point the
+  # secretEnv entries below at Secrets an External Secrets Operator syncs from
+  # AWS Secrets Manager / GCP Secret Manager / Azure Key Vault / Vault. ESO
+  # produces an ordinary Secret, so nothing in this chart changes when it lands.
+  #
+  # And be clear about what a Kubernetes Secret is: base64, not encryption.
+  # `echo <value> | base64 -d` is the whole protection. Anyone with `get secrets`
+  # in this namespace has every plaintext and so does anyone with an etcd backup;
+  # RBAC is the actual control. Secrets are encrypted at rest only if the API
+  # server has an EncryptionConfiguration, which several distributions ship
+  # without. A Secret injected as an env var is readable from /proc/1/environ by
+  # anything in that container.
+  create: false
+
+  # THE SINGLE MOST IMPORTANT FLAG IN THIS FILE, and the chart refuses to render
+  # more than one user-service replica while it is false.
+  #
+  # JwtKeyProvider generates a throwaway 2048-bit RSA pair when
+  # jwt.signing-key.private-key is blank, and JWT_SIGNING_KID keeps its default.
+  # With N replicas that is N DIFFERENT KEYS PUBLISHED UNDER ONE kid, and the
+  # failure is not a clean one:
+  #   - a login round-robins to pod A and the token says kid: sdp-dev-key-1;
+  #   - a resource server fetches /.well-known/jwks.json through the Service and
+  #     may cache POD B's key -- same kid, different modulus;
+  #   - verification fails, and Spring Security does NOT recover, because it
+  #     refetches a JWK set only on an UNKNOWN kid. This kid is known, just wrong.
+  #     The 401 persists for the cache lifespan and then re-lands on a randomly
+  #     chosen pod;
+  #   - the 401 is byte-for-byte the one a forged token produces, so the evidence
+  #     points at the client;
+  #   - and it does not stop at logins: order-service takes a SERVICE token from
+  #     pod A to inventory-service, which verifies against pod B, and a 401 is not
+  #     in that breaker's ignore-exceptions, so the inventory-service circuit
+  #     opens and orders fail 503. A missing signing key shows up on the dashboard
+  #     as inventory-service being down.
+  #
+  # Set this to true only once JWT_PRIVATE_KEY genuinely comes from a Secret that
+  # every replica shares.
+  jwtSigningKeyProvisioned: false
+
+  # Rendered only when create is true. Every value is a placeholder and the chart
+  # would rather fail an install than ship a working credential. Keys must match
+  # the `secretEnv` entries under `services` below; the chart validates that when
+  # create is true.
+  placeholders:
+    # One Postgres role per service, GRANTed on its own database only. Compose
+    # shares the `sdp` superuser because it is one local instance;
+    # infrastructure/postgres/init-databases.sh already documents the real intent
+    # ("credentials scoped to that database"). A shared role would let a
+    # compromised product-service pod read order_db directly, undoing at the SQL
+    # layer the database-per-service boundary ADR 001 enforces in code.
+    #
+    # The username sits WITH the password because they are provisioned and
+    # rotated as a unit, and because Vault's dynamic Postgres roles generate a
+    # fresh username per credential -- splitting the pair across a ConfigMap and a
+    # Secret would make that migration a manifest rewrite instead of a Secret
+    # swap.
+    sdp-user-db:
+      DB_USERNAME: "REPLACE_ME__user_service_role"
+      DB_PASSWORD: "REPLACE_ME__NOT_A_REAL_PASSWORD"
+    sdp-product-db:
+      DB_USERNAME: "REPLACE_ME__product_service_role"
+      DB_PASSWORD: "REPLACE_ME__NOT_A_REAL_PASSWORD"
+    sdp-inventory-db:
+      DB_USERNAME: "REPLACE_ME__inventory_service_role"
+      DB_PASSWORD: "REPLACE_ME__NOT_A_REAL_PASSWORD"
+    sdp-order-db:
+      DB_USERNAME: "REPLACE_ME__order_service_role"
+      DB_PASSWORD: "REPLACE_ME__NOT_A_REAL_PASSWORD"
+    sdp-payment-db:
+      DB_USERNAME: "REPLACE_ME__payment_service_role"
+      DB_PASSWORD: "REPLACE_ME__NOT_A_REAL_PASSWORD"
+    sdp-delivery-db:
+      DB_USERNAME: "REPLACE_ME__delivery_service_role"
+      DB_PASSWORD: "REPLACE_ME__NOT_A_REAL_PASSWORD"
+    # ONE key, shared by EVERY user-service replica -- see
+    # jwtSigningKeyProvisioned above for what happens otherwise. Generate out of
+    # band and never commit:
+    #   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+    #     -out sdp-signing-key.pem
+    #   kubectl -n <ns> create secret generic sdp-jwt-signing \
+    #     --from-file=JWT_PRIVATE_KEY=./sdp-signing-key.pem
+    # JwtKeyProvider.decodePem strips the header, footer and all whitespace, so
+    # the PEM's newlines survive an env var harmlessly.
+    #
+    # There is deliberately no JWT_PUBLIC_KEY: it is derived from the private
+    # key, and supplying a mismatched half publishes a JWKS entry that cannot
+    # verify what the pod signs -- a 100% failure rate, for a value the JVM can
+    # compute.
+    sdp-jwt-signing:
+      JWT_PRIVATE_KEY: "REPLACE_ME__PKCS8_RSA_PRIVATE_KEY__GENERATED_OUT_OF_BAND__NEVER_COMMITTED"
+    # ONE key referenced by TWO Deployments: user-service reads it as the expected
+    # secret for jwt.service-clients.order-service, order-service reads it as the
+    # credential it presents. Same env var name on both sides, so a single
+    # secretKeyRef from each keeps one source of truth. Two copies in two Secrets
+    # is the arrangement that drifts and then stalls every saga with a 401 nobody
+    # can attribute.
+    sdp-service-clients:
+      ORDER_SERVICE_CLIENT_SECRET: "REPLACE_ME__NOT_A_REAL_SECRET"
+    # NOT LISTED, and that is the decision: sdp-bootstrap-admin.
+    # BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD are deliberately absent
+    # from user-service's application.yml (a declared-but-blank property
+    # satisfies @ConditionalOnProperty, which would turn the opt-in into an
+    # always-on), so leaving them unset genuinely means "no seeded account". Two
+    # reasons not to set them in a cluster: BootstrapAdminInitializer is an
+    # ApplicationRunner, so it runs in EVERY replica, and across pods the
+    # findByEmail check and the insert are separate transactions -- on a cold
+    # database two pods can both miss and both save(), and users.email is NOT NULL
+    # UNIQUE, so the loser throws out of its ApplicationRunner and fails startup
+    # (it self-heals on restart, but it is a confusing crash during a first
+    # deploy); and the benefit is one-time while the cost is permanent, a static
+    # full-ADMIN password in etcd and its backups forever in exchange for one
+    # account creation. README.md documents the one-boot window instead.
+
+# -----------------------------------------------------------------------------
+# pod -- security context and scheduling, shared by all eight services
+# -----------------------------------------------------------------------------
+pod:
+  # These numbers are the image's, not a preference: every Dockerfile does
+  # `addgroup -g 1000 -S spring && adduser -u 1000 -S spring -G spring` and
+  # `USER 1000:1000`. The UID is pinned NUMERICALLY in the image precisely so
+  # runAsNonRoot works here -- the kubelet verifies the image's user before
+  # starting the container and cannot read /etc/passwd inside it, so
+  # `USER spring:spring` fails outright with "image has non-numeric user
+  # (spring), cannot verify user is non-root" even though that name maps to a
+  # perfectly good non-root UID.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    runAsGroup: 1000
+    # Kubernetes applies NO seccomp profile by default unless the SeccompDefault
+    # feature gate is on, so this is a real step rather than a restatement. The
+    # trade: RuntimeDefault blocks perf_event_open, so async-profiler needs it
+    # relaxed for the pod being profiled.
+    seccompProfile:
+      type: RuntimeDefault
+    # No fsGroup. The only volume is an emptyDir, which is created
+    # world-writable, so UID 1000 can write to it without one -- and an
+    # unnecessary fsGroup costs a recursive chown on every mount at startup.
+
+  containerSecurityContext:
+    # Works because the jar is root-owned and mode 644: `java -jar` only ever
+    # needs to read it, and a process that cannot rewrite its own code is the
+    # point. It requires the /tmp emptyDir below -- Spring Boot's embedded Tomcat
+    # unconditionally creates ${java.io.tmpdir}/tomcat.<port>.<random> at startup,
+    # so the seven servlet services FAIL TO START without it. The two stanzas
+    # have to travel together, which is why the volume is not optional in this
+    # chart.
+    readOnlyRootFilesystem: true
+    allowPrivilegeEscalation: false
+    capabilities:
+      # Safe only because every port is >= 8080. Moving a service to port 80
+      # would need NET_BIND_SERVICE back, and the failure would be a bind error
+      # at startup rather than anything subtle.
+      drop: ["ALL"]
+
+  # Nothing in this platform calls the Kubernetes API, so no pod needs a token
+  # mounted at /var/run/secrets/kubernetes.io/serviceaccount.
+  automountServiceAccountToken: false
+
+  # What /tmp is for, beyond Tomcat's work directory: the JVM's hsperfdata file
+  # and the /tmp/.java_pid<n> attach socket that jcmd, jstack and jmap need.
+  # Without it the app runs and every live diagnostic is gone, which is why
+  # api-gateway gets the mount too even though Netty needs no temp directory.
+  #
+  # A disk emptyDir with a sizeLimit, NOT medium: Memory -- a tmpfs counts
+  # against the container's memory limit and would silently eat the heap budget
+  # the JVM sized from that same limit.
+  tmpVolume:
+    sizeLimit: 64Mi
+
+  # Extra pod-level scheduling knobs, applied to every service.
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  # Merged into every pod template's labels and annotations.
+  extraLabels: {}
+  extraAnnotations: {}
+
+# -----------------------------------------------------------------------------
+# topologySpreadConstraints -- off by default
+# -----------------------------------------------------------------------------
+topologySpread:
+  # Off because this platform has no cluster yet and the failure mode of getting
+  # it wrong is pods that never schedule.
+  enabled: false
+  hostnameKey: kubernetes.io/hostname
+  zoneKey: topology.kubernetes.io/zone
+  # ScheduleAnyway, NOT DoNotSchedule: on a one- or two-node cluster
+  # DoNotSchedule leaves pods Pending indefinitely, and "spread if you can" is
+  # what is actually wanted from a soft anti-affinity rule.
+  whenUnsatisfiable: ScheduleAnyway
+  maxSkew: 1
+  # matchLabelKeys with pod-template-hash keeps the OLD ReplicaSet's pods from
+  # counting against the NEW one's skew during a rollout, which otherwise stalls
+  # the rollout on a small cluster. It needs Kubernetes 1.27+ (beta) / 1.30+ (GA);
+  # set this to [] on anything older, or the field is dropped by the API server
+  # and the stall comes back silently.
+  matchLabelKeys:
+    - pod-template-hash
+  zoneSpread: true
+
+# -----------------------------------------------------------------------------
+# podDisruptionBudget -- off by default
+# -----------------------------------------------------------------------------
+podDisruptionBudget:
+  # Off because the single most common PDB mistake is the one a single-replica
+  # default would walk straight into: a PDB on a one-replica Deployment makes the
+  # eviction API refuse forever, so `kubectl drain` hangs and a node cannot be
+  # patched. The chart refuses to render a PDB for any service at one replica
+  # even when this is true -- see templates/pdb.yaml.
+  enabled: false
+  # maxUnavailable, not minAvailable: with an HPA in play, a minAvailable pinned
+  # to today's replica count blocks drains as soon as it scales down.
+  maxUnavailable: 1
+
+# -----------------------------------------------------------------------------
+# observability
+# -----------------------------------------------------------------------------
+observability:
+  # ECS log fields set from the downward API. This recovers, for logs, the one
+  # thing the move to Kubernetes takes away: the stable hostname that tied a log
+  # line to a process. service.node.name gets the pod name, which is also the
+  # `instance` label the ServiceMonitor relabels below, so a metric anomaly and
+  # its log lines can be joined by the same string.
+  ecsFieldsFromDownwardApi: true
+
+  serviceMonitor:
+    # Needs the Prometheus Operator CRDs. Off by default because a
+    # ServiceMonitor on a cluster without monitoring.coreos.com/v1 fails the
+    # install with an unhelpful error.
+    enabled: false
+    interval: 15s
+    scrapeTimeout: 10s
+    # MUST match the Prometheus CR's spec.serviceMonitorSelector. With
+    # kube-prometheus-stack that is `release: <helm release name of the stack>`.
+    # Get this wrong and the ServiceMonitor is simply IGNORED -- no error, no
+    # target, blank dashboard. Confirm on Prometheus's /targets page the first
+    # time this is applied.
+    extraLabels:
+      release: kube-prometheus-stack
+    # Drop actuator's own traffic from the HTTP server metrics. In Compose only a
+    # container healthcheck hit /actuator; here the kubelet probes liveness AND
+    # readiness every ~10s per pod and Prometheus scrapes every 15s, so on a
+    # cluster with little real traffic probe traffic becomes the MAJORITY of
+    # http_server_requests_seconds_count. That corrupts three dashboard panels at
+    # once: request rate measures the kubelet, error rate gets an inflated
+    # denominator so real 5xx spikes flatten out, and p95 latency is dragged
+    # toward actuator's sub-millisecond responses. Dropped here rather than in
+    # three dashboard queries so every future query and SLO inherits the fix.
+    # The cost, stated plainly: actuator request rates become unqueryable.
+    dropActuatorHttpMetrics: true
+
+  prometheusRule:
+    # There are no alert rules in this repository at all --
+    # infrastructure/prometheus/prometheus.yml has no rule_files. Under Compose
+    # that was fine because a human was looking at Grafana. In a cluster nobody
+    # is, and the whole point of the scrape-health group below is to make a blank
+    # dashboard LOUD instead of silent.
+    enabled: false
+    extraLabels:
+      release: kube-prometheus-stack
+    thresholds:
+      # max, not sum: outbox.oldest.pending.age is a DB-global gauge read at
+      # scrape time, so every replica reports the same number.
+      outboxOldestPendingAgeSeconds: 60
+      httpErrorRate: 0.05
+
+# -----------------------------------------------------------------------------
+# networkPolicy
+# -----------------------------------------------------------------------------
+networkPolicy:
+  # Off by default, and READ THIS BEFORE TURNING IT ON, because the semantics are
+  # a trap. A NetworkPolicy with policyTypes: [Ingress] that selects a pod denies
+  # ALL other ingress to that pod. So a "just allow Prometheus to scrape" policy
+  # applied to a cluster that was not default-deny does not add an allowance --
+  # it takes away gateway-to-backend traffic and breaks the platform. The policy
+  # this chart renders therefore allows, in one object: the monitoring namespace
+  # on the http port, and every pod in THIS namespace on the http port (which is
+  # what gateway -> backend, order-service -> inventory/payment/user, and
+  # frontend -> gateway all need).
+  enabled: false
+  # Where Prometheus runs. Matched on the kubernetes.io/metadata.name label, which
+  # the API server sets automatically on every namespace (1.21+).
+  monitoringNamespace: observability
+  # Where the ingress controller runs. Only the gateway (and the frontend) need
+  # to accept traffic from it.
+  ingressControllerNamespace: ingress-nginx
+  # No egress rules. Locking egress down needs DNS (kube-dns on 53/UDP and TCP),
+  # Postgres, Kafka, Redis, the OTLP collector and user-service's JWKS spelled
+  # out, and half of those are outside the cluster in a managed setup. A policy
+  # that names only some of them fails closed on the rest, which is the same
+  # class of mistake as the ingress trap above -- so it is documented rather than
+  # half-written.
+  restrictEgress: false
+
+# -----------------------------------------------------------------------------
+# ingress -- how the gateway is actually exposed
+# -----------------------------------------------------------------------------
+# All eight Services are ClusterIP, including api-gateway. The gateway is NOT
+# reachable from outside the cluster until one of these happens:
+#
+#   1. this Ingress (the recommended route): one host, TLS terminated by the
+#      controller, path-based routing to the gateway and the SPA. Needs an
+#      ingress controller and, for TLS, a cert -- cert-manager or a pre-created
+#      Secret;
+#   2. `services.api-gateway.service.type: LoadBalancer`, which gets a cloud L4
+#      load balancer and an IP, no host routing and no TLS termination. Fine for
+#      a quick demo, and it means the SPA has to live on a different origin,
+#      which is the one thing this platform has no CORS configuration for;
+#   3. `kubectl port-forward svc/api-gateway 8080:8080`, which is how to reach
+#      Swagger UI without exposing anything (NOTES.txt prints the command).
+#
+# Same host for the SPA and the API is what makes the frontend's relative API paths
+# mean anything: src/config.ts ships a base path of "" and refuses an absolute
+# origin at module load, precisely because there is no CORS configuration anywhere in
+# this repository -- adding it is a code change in the gateway plus a new
+# allowed-origins env var plus a preflight failure mode that looks like the API being
+# down.
+ingress:
+  enabled: false
+  className: ""
+  # MUST equal common.publicGatewayUrl's host, or Swagger UI's "Try it out"
+  # advertises a cluster-internal name no browser can reach.
+  host: "REPLACE_ME_PUBLIC_HOST"
+  annotations: {}
+    # nginx.ingress.kubernetes.io/proxy-body-size: "1m"
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+  tls:
+    enabled: false
+    secretName: ""
+  # /.well-known/jwks.json is public and unauthenticated BY DESIGN (ADR 007): a
+  # JWKS holds public keys only, and a resource server must fetch it before it can
+  # authenticate anything. Routed through the gateway so a client that only ever
+  # reaches the platform through the front door can see it.
+  exposeJwks: true
+  # The aggregated Swagger UI and the six /v3/api-docs/<service> documents. OFF by
+  # default: publishing a complete, accurate description of every endpoint to the
+  # internet is a decision, not a default. Off, they are still reachable with
+  # `kubectl port-forward`.
+  exposeSwaggerUi: false
+  # /actuator is never routed through the Ingress by this chart, at any setting.
+  # The probe paths and /actuator/prometheus are permitted to UNAUTHENTICATED
+  # callers on the pod port (that is what makes probes and scraping work), and
+  # publishing them would hand endpoint URIs, DB pool sizes and JVM internals to
+  # the internet.
+
+# -----------------------------------------------------------------------------
+# frontend -- the React SPA
+# -----------------------------------------------------------------------------
+frontend:
+  # OFF by default because there is no published image for it: CI's docker-build
+  # matrix covers the eight Java services only, and frontend/ has no Dockerfile
+  # yet. Everything below is templated and ready; flip this to true once an image
+  # exists.
+  #
+  # THERE IS NO ConfigMap FOR THIS WORKLOAD, AND IT NEEDS NONE. That is worth
+  # stating because the obvious design -- mount a /config.json the app fetches at
+  # boot, so one image serves every environment -- is what this chart originally
+  # carried, and the app that got built does something better: `src/config.ts`
+  # reads a BUILD-time VITE_API_BASE_PATH that is `''` in every environment it
+  # ships, asserts at module load that it is a relative path, and `src/lib/api/http.ts`
+  # (the only fetch in the app) builds every URL from it. So the bundle contains no
+  # origin, no hostname and nothing environment-specific: the same artifact is
+  # correct everywhere, with no runtime config to mount, no 404-fallback path to get
+  # right, and nothing for a ConfigMap to hold. A mounted config.json would be dead
+  # weight that the app never reads.
+  #
+  # What that costs, and the chart is what pays it: the SPA MUST be served from the
+  # same origin as the API. Relative URLs have no other meaning. `ingress.host` is
+  # what guarantees it, and `assertRelativeBasePath` in the app refuses an absolute
+  # origin outright rather than letting someone reintroduce a cross-origin setup
+  # that this platform has no CORS configuration for.
+  #
+  # THE REST OF THE CONTRACT THIS CHART EXPECTS OF THE IMAGE, none of which can be
+  # checked here because the Dockerfile does not exist yet:
+  #   - serves on containerPort 8080 as UID 1000, NOT port 80 -- this pod drops ALL
+  #     capabilities including NET_BIND_SERVICE, so a root-nginx image that binds 80
+  #     will not start (nginxinc/nginx-unprivileged is the usual base);
+  #   - runs with a read-only root filesystem, writing only to the emptyDir mounts
+  #     below;
+  #   - serves index.html for unknown paths, because a client-side router needs that
+  #     and the Ingress sends every unmatched path here.
+  #
+  # AND THE RULE WITH NO EXCEPTIONS: this workload gets NO Secret, ever. A browser
+  # bundle has no confidentiality -- anything the page can read, so can the person
+  # reading it -- so ORDER_SERVICE_CLIENT_SECRET (which would let any visitor mint
+  # SERVICE-role tokens) and BOOTSTRAP_ADMIN_PASSWORD must never be within reach of
+  # it. There is deliberately no secretEnv field here, and adding one is not a small
+  # change.
+  #
+  # ONE PRODUCT CONSEQUENCE, before somebody tries to solve it in React: this app
+  # inherits an authentication design with no refresh tokens and no revocation, both
+  # recorded as out of scope in docs/security.md. A one-hour access token in the
+  # browser, unrenewable, means the user is logged out mid-session with no way to
+  # extend it, and a logout cannot actually invalidate anything. That is a backend
+  # decision surfacing in the UI, not a frontend bug.
+  enabled: false
+  # Bare, like the eight backend names, so naming.prefix reads `prod-frontend`
+  # rather than `prod-sdp-frontend`. It is also the value the edge NetworkPolicy
+  # matches on (app.kubernetes.io/name), so changing it changes both.
+  name: frontend
+  replicaCount: 1
+  image:
+    registry: ghcr.io
+    repository: yassinefourati/smart-delivery-platform
+    name: frontend
+    tag: ""
+    pullPolicy: IfNotPresent
+  containerPort: 8080
+  service:
+    type: ClusterIP
+    port: 8080
+  # nginx writes to all three even with a read-only root filesystem.
+  writableVolumes:
+    - name: tmp
+      mountPath: /tmp
+      sizeLimit: 16Mi
+    - name: nginx-cache
+      mountPath: /var/cache/nginx
+      sizeLimit: 64Mi
+    - name: nginx-run
+      mountPath: /var/run
+      sizeLimit: 8Mi
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 128Mi
+  # A static file server starts in milliseconds and has no dependency to wait on,
+  # so there is no startupProbe here and no argument to have about what belongs in
+  # which probe group. This is the one workload in the platform where the naive
+  # recipe is the right one.
+  probePath: /index.html
+  terminationGracePeriodSeconds: 30
+  preStopSleepSeconds: 5
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 4
+    targetCPUUtilizationPercentage: 70
+  podDisruptionBudget:
+    enabled: false
+
+# -----------------------------------------------------------------------------
+# lifecycle
+# -----------------------------------------------------------------------------
+lifecycle:
+  # The native `sleep` preStop action (Kubernetes 1.30+, GA in 1.32) needs no
+  # shell in the image. Set this to false on an older cluster and the chart
+  # renders the exec form instead -- eclipse-temurin:21-jre-alpine has BusyBox
+  # sleep and it needs no privileges, so it works as UID 1000. The exec form
+  # would stop working on a distroless base, which is the reason to prefer the
+  # native action wherever it exists.
+  preStopUseNativeSleep: true
+
+# =============================================================================
+# services
+# =============================================================================
+# ONE map, ONE set of templates. The eight services are deliberately uniform --
+# same base image shape, same actuator surface, same error contract, same
+# correlation filter, all of it out of platform-starter (ADR 009) -- so a shared
+# template plus a values map is the honest representation. Eight near-identical
+# subcharts would be eight copies to drift, and the first thing to drift would be
+# whatever is most load-bearing: the probe paths, the security context, the
+# graceful-shutdown budget.
+#
+# WHAT GENUINELY DIFFERS, and is therefore a field below rather than a copy:
+# the port; the runtime (api-gateway is WebFlux, the other seven are servlet);
+# whether the service owns a schema (six do, api-gateway and notification-service
+# do not); whether it publishes through the outbox (four do); whether it has
+# @KafkaListener containers (three do); the CPU request and heap size; the
+# shutdown budget, which follows from the phase count; and each service's own
+# configuration knobs.
+#
+# ------------------------- THE SHUTDOWN BUDGET ------------------------------
+# These three fields are ONE decision written in three places, and the services'
+# own application.yml files say so in as many words: preStopSleepSeconds,
+# shutdownPhaseTimeoutSeconds (which the chart passes as SHUTDOWN_PHASE_TIMEOUT,
+# the env var those files read) and terminationGracePeriodSeconds. The chart fails
+# the render if they disagree, so they cannot drift.
+#
+# spring.lifecycle.timeout-per-shutdown-phase bounds EACH SmartLifecycle phase
+# independently -- it is not a total. The phases, read off the 3.5.13 / 6.2.17 /
+# 3.3.14 jars:
+#
+#   2147483547  Kafka listener containers  AbstractMessageListenerContainer
+#   2147482623  graceful request drain     WebServerGracefulShutdownLifecycle
+#   2147481599  web server stop            WebServerStartStopLifecycle
+#   1073741823  the @Scheduled task pool   ExecutorConfigurationSupport
+#  -2147483648  the shared Kafka producer  DefaultKafkaProducerFactory, whose
+#               stop() closes it with a 30s DEFAULT_PHYSICAL_CLOSE_TIMEOUT that
+#               Boot exposes no property to shrink
+#
+# Two things about that list that are easy to get wrong in both directions. The
+# web-server stop is a SEPARATE phase from the request drain, so even a service
+# with nothing else in it has two phases and not one. And `applicationTaskExecutor`
+# is NOT on it: Boot 3.5 annotates that bean @Lazy, so nothing instantiates it in
+# these services and it never joins the lifecycle -- it would the day one of them
+# grows an @Async method, and phase 1073741823 would gain an occupant.
+#
+# SO WHY 45 AND NOT THE SUM. Adding up every phase's worst case plus the producer
+# close gives about 135s for order-service, and that budget is the wrong trade. A
+# pod that reaches it is a pod that is stuck, and sizing the grace period for it
+# means every stuck pod holds a rollout slot for over two minutes -- while a
+# SIGKILL at that point is SAFE here: an interrupted outbox batch rolls back to
+# PENDING (ADR 006) and a claimed saga's lease expires so a peer picks it up
+# (ADR 008). So the budget covers the drain being used IN FULL with everything else
+# behaving -- 5s preStop + one phase timeout for the drain + one phase timeout of
+# headroom for the remaining phases and bean destruction -- and the pathological
+# case is deliberately left to SIGKILL. The way to make that case cheaper is to
+# shrink its dominant term (a ProducerFactory customizer calling
+# setPhysicalCloseTimeout(5) in platform-starter, next to the outbox code that owns
+# the trade-off), not to inflate this number.
+#
+#   service            preStop  phase timeout  grace
+#   api-gateway          5          15          40   (5 + 15 + 20; twice the phase
+#                                                     timeout is only 35, so the
+#                                                     headroom is explicit here)
+#   the other seven      5          20          45   (5 + 20 + 20)
+#
+# A realistic shutdown is one or two seconds. maxSurge 1 / maxUnavailable 0 in the
+# rollout strategy is what keeps a slow one from costing capacity.
+# ---------------------------------------------------------------------------
+services:
+
+  # ---------------------------------------------------------------------------
+  api-gateway:
+    enabled: true
+    port: 8080
+    runtime: webflux
+    ownsSchema: false
+    hasOutbox: false
+    hasKafkaListeners: false
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      # ClusterIP even for the gateway. See the `ingress:` block above for the
+      # three ways it actually gets exposed; LoadBalancer here is option 2.
+      type: ClusterIP
+      annotations: {}
+    # Reactor Netty's default loop count is max(cores, 4), and with no CPU limit
+    # there is no cgroup quota for the JVM to read -- since JDK 19 it ignores
+    # cpu.shares -- so it would size event loops, GC threads, JIT threads and the
+    # common ForkJoinPool from the NODE's core count. On a 64-core node that is
+    # ~28 parallel GC threads for a pod given half a core. This lives next to
+    # resources.requests.cpu on purpose: two copies of one number in two files is
+    # a number that drifts, which is why it is not baked into the image.
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 15
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds + 5s of explicit headroom. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 40
+    # 0 = no SCHEDULER_POOL_SIZE is emitted. This service carries no
+    # @EnableScheduling, and TaskSchedulingAutoConfiguration is conditional on the
+    # scheduled-annotation processor bean, so there is no scheduler here for the
+    # property to configure -- and config that cannot do anything is worse than
+    # config that is absent. Stated as a 0 rather than left out so the absence is
+    # visibly a decision.
+    schedulerPoolSize: 0
+    preStopSleepSeconds: 5
+    # 0 means "probe the traffic port". A non-zero value renders a second
+    # containerPort named mgmt and points all three probes at it, which is the
+    # real fix for probes competing with application traffic for request threads
+    # -- but it needs management.server.port set in the service's application.yml
+    # first, and nothing in this repository sets one. Left at 0, and the coupling
+    # is mitigated instead by database.connectionTimeoutMs above.
+    managementPort: 0
+    probes:
+      startup:
+        # 24 x 5s = 120s, not the servlet services' 300s: no Flyway, no schema,
+        # nothing to migrate. The only thing to wait for is JVM boot and
+        # route-table construction.
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 24
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+        # A container that failed liveness is by definition one whose graceful
+        # shutdown cannot complete -- a wedged thread pool or GC thrash on the way
+        # to an OOM is exactly what stops the drain phase finishing. So draining
+        # buys nothing and the pod-level budget is pure delay before replacement.
+        # This probe-level override (Kubernetes 1.25+) cuts it to 10s. Without it
+        # a wedged gateway takes 60s to detect plus 55s to kill plus a boot.
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        # Reactive and cheap per request, but a throttled event loop stalls every
+        # connection multiplexed onto it rather than one request -- so this is the
+        # service where a CPU limit is most dangerous. There is no cpu limit on any
+        # service in this chart: a CFS quota is 50ms per 100ms period summed across
+        # ALL threads, so one G1 young collection with two GC threads plus a C2
+        # compilation can exhaust the period and freeze every thread until the next
+        # one. Median latency looks fine and p99 falls off a cliff, with nothing in
+        # the application's own metrics to explain it. The signal is
+        # container_cpu_cfs_throttled_periods_total, which is not on the Grafana
+        # dashboard today.
+        cpu: 500m
+        # requests == limits, and for a JVM that is right for an unusually strong
+        # reason: MaxRAMPercentage sizes the heap from the LIMIT, so a gap between
+        # request and limit is memory the JVM has already committed to using and
+        # the scheduler has not reserved. Request 512Mi / limit 1Gi and the JVM
+        # sizes a 600MB heap, the scheduler packs the node against 512Mi, and the
+        # pod is OOMKilled the first time it grows into memory that was never
+        # there. Equal values also give a Burstable pod the best possible eviction
+        # score, since usage never exceeds the request.
+        memory: 1Gi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 1Gi
+        ephemeral-storage: 1Gi
+    config:
+      # Bounds the connection pool Reactor Netty keeps to the backends, and it is
+      # here because the defaults are unbounded in the one way that matters:
+      # HttpClientProperties$Pool leaves maxIdleTime and maxLifeTime null and
+      # evictionInterval at ZERO, and api-gateway's application.yml configures only
+      # connect-timeout and response-timeout -- no pool block at all. So the
+      # gateway holds pooled TCP connections to backend pods indefinitely, pinned
+      # to one pod through conntrack, where neither EndpointSlice removal nor the
+      # backend's 5s preStop sleep has any effect on them.
+      #
+      # The failure that fixes: a backend pod is deleted, its preStop elapses with
+      # nothing in flight on that idle socket, SIGTERM, the drain completes in ~0ms
+      # and the connector FINs the connection -- and in the window before the
+      # gateway's pool notices the FIN, a client POSTs /api/v1/orders, the gateway
+      # leases that socket and writes the request. Reactor Netty's retry-once does
+      # not apply once bytes are on the wire, so the exchange fails with
+      # PrematureCloseException and the gateway returns 500 on a non-idempotent POST
+      # whose outcome the caller cannot determine. The 5s preStop makes this MORE
+      # likely per deploy, not less, because it keeps the socket healthy and
+      # leasable for five extra seconds.
+      #
+      # 8s of idle is below any sane server-side keep-alive timeout (Tomcat's
+      # default is 60s), and a 5s eviction interval means idle sockets are reaped in
+      # the background rather than only when something tries to lease one.
+      SPRING_CLOUD_GATEWAY_SERVER_WEBFLUX_HTTPCLIENT_POOL_MAX_IDLE_TIME: "8s"
+      SPRING_CLOUD_GATEWAY_SERVER_WEBFLUX_HTTPCLIENT_POOL_MAX_LIFE_TIME: "60s"
+      SPRING_CLOUD_GATEWAY_SERVER_WEBFLUX_HTTPCLIENT_POOL_EVICTION_INTERVAL: "5s"
+    # No Secret reference of any kind: api-gateway holds no credential, owns no
+    # schema, and verifies nothing. Worth stating because it means it needs no
+    # ServiceAccount that can read one.
+    secretEnv: []
+    extraEnv: []
+    autoscaling:
+      # CPU is a reasonable saturation proxy for a reverse proxy, and the gateway
+      # is stateless. minReplicas 2 because one replica means a node drain is an
+      # outage.
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 60
+
+  # ---------------------------------------------------------------------------
+  user-service:
+    enabled: true
+    port: 8081
+    runtime: servlet
+    ownsSchema: true
+    hasOutbox: false
+    hasKafkaListeners: false
+    # STAYS AT 1 UNTIL secrets.jwtSigningKeyProvisioned IS TRUE. The chart fails
+    # the render otherwise, because the failure mode is worse than an outage: not
+    # a service that is down, but intermittent 401s across the whole platform that
+    # surface on the dashboard as inventory-service being unhealthy. See
+    # secrets.jwtSigningKeyProvisioned above for the mechanism.
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # 0 = no SCHEDULER_POOL_SIZE is emitted. This service carries no
+    # @EnableScheduling, and TaskSchedulingAutoConfiguration is conditional on the
+    # scheduled-annotation processor bean, so there is no scheduler here for the
+    # property to configure -- and config that cannot do anything is worse than
+    # config that is absent. Stated as a 0 rather than left out so the absence is
+    # visibly a decision.
+    schedulerPoolSize: 0
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        # 60 x 5s = 300s, and this is a MIGRATION budget, not a JVM budget.
+        # Flyway runs during bean initialization, before finishRefresh() opens the
+        # port, so a probe gets connection-refused -- and even once the port is
+        # open, /actuator/health/liveness returns 503 until ApplicationStartedEvent
+        # because ApplicationAvailability defaults livenessState to BROKEN. What
+        # has to fit inside this window:
+        #   waiting for Postgres   connect-retries 60 x 1s   =  60s
+        #   waiting for a peer     lock-retry-count -1       = unbounded, so this
+        #                          probe is what bounds it
+        #   JVM boot + refresh     (compose uses start_period: 30s)  ~30s
+        #   the migration itself   currently <1s
+        # Set tighter than the migration and Kubernetes kills the pod mid-Flyway:
+        # safe on Postgres (transactional DDL, and the advisory lock dies with the
+        # backend, so there is no stale lock to repair) but an unbreakable loop --
+        # killed, restarted, migration starts over, killed again. The exception is
+        # precisely the migration written to avoid downtime: CREATE INDEX
+        # CONCURRENTLY cannot run inside a transaction, and an interrupted run
+        # leaves an INVALID index and a failed history row that needs a manual
+        # flyway repair.
+        #
+        # Bounded at both ends: a pod that will never start is still killed at five
+        # minutes, and 300 < the Deployment's progressDeadlineSeconds of 600, so a
+        # genuinely broken rollout is still reported as failed. Needing more than
+        # this is the signal to stop migrating at startup, not to raise the number
+        # -- the same 300s is also how long Kubernetes waits before noticing a
+        # wedged pod on every ordinary restart.
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 60
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        # 3s, matching the reasoning written into application.yml, and thinner
+        # than it looks: these probes are served by the SAME Tomcat worker pool as
+        # application traffic. database.connectionTimeoutMs is the mitigation --
+        # it makes a saturated pod shed load instead of parking all 200 workers in
+        # HikariPool.getConnection(). If probe timeouts are ever observed on a
+        # busy pod, raise this to 5 before touching failureThreshold: the total
+        # detection window is periodSeconds x failureThreshold either way.
+        timeoutSeconds: 3
+        # 6 x 10s = 60s of consecutive failure before a restart. Generous on
+        # purpose: the only thing that can fail here is the JVM's ability to answer
+        # at all, and the commonest cause -- a GC pause long enough to blow the
+        # timeout -- is transient, while a restart is destructive (cold Hikari
+        # pool, cold JWKS cache). It should take a minute of sustained
+        # unresponsiveness, not thirty seconds of bad luck.
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        # The CPU-heaviest service per request in the platform, and it is not
+        # close: BCryptPasswordEncoder at default strength 10 is tens of
+        # milliseconds of pure computation per login with no I/O to hide behind, so
+        # roughly ten logins a second saturates a core.
+        cpu: 750m
+        memory: 768Mi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 768Mi
+        ephemeral-storage: 1Gi
+    config:
+      # Host, port and database name only -- no credentials in the URL, matching
+      # what application.yml already does with separate username/password
+      # properties. A URL with credentials in it would drag this whole ConfigMap
+      # into a Secret. sslmode=require because a managed Postgres is reached over
+      # a network somebody else operates.
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_USER_HOST:5432/user_db?sslmode=require"
+      # NEVER ship the sdp-dev-key-1 default. It is stamped into every token's kid
+      # header, so "dev" ends up in a production token where somebody will read it
+      # and draw the wrong conclusion -- and a kid must name ONE piece of key
+      # material forever, so reusing one across different keys is exactly the
+      # dev-mode failure the shared signing Secret exists to prevent. Label it by
+      # generation, e.g. sdp-2026-04-a.
+      JWT_SIGNING_KID: "sdp-REPLACE_ME_YYYY_MM_a"
+      # Also the retirement window for a rotated key: nothing signed by the old key
+      # can still be unexpired after this long. README.md has the three-step
+      # rotation.
+      JWT_EXPIRATION: "1h"
+      JWT_SERVICE_EXPIRATION: "5m"
+    secretEnv:
+      - name: DB_USERNAME
+        secretName: sdp-user-db
+        key: DB_USERNAME
+      - name: DB_PASSWORD
+        secretName: sdp-user-db
+        key: DB_PASSWORD
+      - name: JWT_PRIVATE_KEY
+        secretName: sdp-jwt-signing
+        key: JWT_PRIVATE_KEY
+      # The SAME Secret key order-service reads. One value, two references, never
+      # two copies.
+      - name: ORDER_SERVICE_CLIENT_SECRET
+        secretName: sdp-service-clients
+        key: ORDER_SERVICE_CLIENT_SECRET
+    extraEnv: []
+    autoscaling:
+      # DO NOT enable this until secrets.jwtSigningKeyProvisioned is true -- an
+      # HPA is a replica count that moves on its own. CPU is a TRUE saturation
+      # proxy here, unusually, because BCrypt is the load.
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 6
+      targetCPUUtilizationPercentage: 65
+
+  # ---------------------------------------------------------------------------
+  product-service:
+    enabled: true
+    port: 8082
+    runtime: servlet
+    ownsSchema: true
+    hasOutbox: false
+    hasKafkaListeners: false
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # 0 = no SCHEDULER_POOL_SIZE is emitted. This service carries no
+    # @EnableScheduling, and TaskSchedulingAutoConfiguration is conditional on the
+    # scheduled-annotation processor bean, so there is no scheduler here for the
+    # property to configure -- and config that cannot do anything is worse than
+    # config that is absent. Stated as a 0 rather than left out so the absence is
+    # visibly a decision.
+    schedulerPoolSize: 0
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 60
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        # DB- and Redis-bound with low CPU per request; the cache is what it
+        # spends its time on.
+        cpu: 500m
+        memory: 1Gi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 1Gi
+        ephemeral-storage: 1Gi
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_PRODUCT_HOST:5432/product_db?sslmode=require"
+      # A managed Redis, or a Redis operator's Service. This chart does not run
+      # one -- see README.md.
+      #
+      # NOT YET BINDABLE, flagged rather than invented: product-service's
+      # application.yml sets only spring.data.redis.host and .port, so a Redis
+      # that requires AUTH needs spring.data.redis.password added there first.
+      # Setting a REDIS_PASSWORD env var here would be silently ignored and the
+      # failure would look like a connection refusal.
+      REDIS_HOST: "redis-master.data.svc.cluster.local"
+      REDIS_PORT: "6379"
+    secretEnv:
+      - name: DB_USERNAME
+        secretName: sdp-product-db
+        key: DB_USERNAME
+      - name: DB_PASSWORD
+        secretName: sdp-product-db
+        key: DB_PASSWORD
+    extraEnv: []
+    autoscaling:
+      # Stateless cached reads, the most straightforwardly scalable service here.
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 8
+      targetCPUUtilizationPercentage: 65
+
+  # ---------------------------------------------------------------------------
+  inventory-service:
+    enabled: true
+    port: 8083
+    runtime: servlet
+    ownsSchema: true
+    hasOutbox: true
+    # Publishes through the outbox and has no @KafkaListener, so there is no
+    # listener container to stop -- which is why its shutdown budget is 20s
+    # shorter than order-service's.
+    hasKafkaListeners: false
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # Passed as SCHEDULER_POOL_SIZE. One thread per @Scheduled method, because the
+    # default of 1 means OutboxPublisher holding its transaction across a batch is
+    # time in which the cleanup job -- and, in order-service, the stuck-saga reaper --
+    # simply do not run at all. That reads as "the reaper is not running" and is
+    # really "it never got a thread". At shutdown it also means up to 2 tasks can be
+    # in flight in phase 1073741823, all waited for under one phase timeout.
+    schedulerPoolSize: 2
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 60
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        cpu: 400m
+        memory: 768Mi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 768Mi
+        ephemeral-storage: 1Gi
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_INVENTORY_HOST:5432/inventory_db?sslmode=require"
+    secretEnv:
+      - name: DB_USERNAME
+        secretName: sdp-inventory-db
+        key: DB_USERNAME
+      - name: DB_PASSWORD
+        secretName: sdp-inventory-db
+        key: DB_PASSWORD
+    extraEnv: []
+    autoscaling:
+      # Deliberately NOT one of the three autoscaled services, and not for lack of
+      # load: this service's throughput is bounded by SELECT ... FOR UPDATE on the
+      # same hot stock rows, so replicas past about three buy lock waits rather
+      # than throughput. Scaling it is a data-model change (per-warehouse row
+      # partitioning), not a replica count.
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 3
+      targetCPUUtilizationPercentage: 70
+
+  # ---------------------------------------------------------------------------
+  order-service:
+    enabled: true
+    port: 8084
+    runtime: servlet
+    ownsSchema: true
+    hasOutbox: true
+    hasKafkaListeners: true
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # Passed as SCHEDULER_POOL_SIZE. One thread per @Scheduled method, because the
+    # default of 1 means OutboxPublisher holding its transaction across a batch is
+    # time in which the cleanup job -- and, in order-service, the stuck-saga reaper --
+    # simply do not run at all. That reads as "the reaper is not running" and is
+    # really "it never got a thread". At shutdown it also means up to 3 tasks can be
+    # in flight in phase 1073741823, all waited for under one phase timeout.
+    schedulerPoolSize: 3
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 60
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        # Worth knowing what this probe does NOT catch here, because it is the
+        # deliberate consequence of pointing liveness at livenessState alone: a
+        # saga wedged on a bug leaves this service UP and useless forever, and
+        # Kubernetes will never restart it. That detection is moved to metrics on
+        # purpose -- order.saga.outcomes, saga.stuck.count and
+        # outbox.oldest.pending.age.seconds already exist for it -- which means
+        # this phase is only finished once something alerts on those gauges. The
+        # chart's optional PrometheusRule is that something.
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        # Thread count, not request rate, sets this floor: fifteen @KafkaListener
+        # containers each with their own consumer and fetch buffers, a producer, a
+        # Hikari pool, and three @Scheduled jobs (outbox publisher, outbox cleanup,
+        # stuck-saga reaper).
+        cpu: 750m
+        memory: 1Gi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 1Gi
+        ephemeral-storage: 1Gi
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_ORDER_HOST:5432/order_db?sslmode=require"
+      # The client id is not a credential -- only its secret is. Keeping it in the
+      # ConfigMap is also what makes a zero-window secret rotation possible: add a
+      # second entry to user-service's jwt.service-clients map, point this at it,
+      # roll, then drop the first. (Caveat worth knowing before relying on it: an
+      # env-var-derived map key cannot contain a hyphen, so the second id has to be
+      # something like orderservice2, or the map has to come from a mounted YAML
+      # fragment.)
+      ORDER_SERVICE_CLIENT_ID: "order-service"
+      # The reaper (ADR 008). Restated here so a cluster can tune it without a
+      # rebuild; these are application.yml's own defaults.
+      SAGA_STUCK_THRESHOLD: "5m"
+      SAGA_MAX_ATTEMPTS: "3"
+      SAGA_REAPER_BATCH_SIZE: "50"
+      SAGA_REAPER_INTERVAL_MS: "60000"
+    secretEnv:
+      - name: DB_USERNAME
+        secretName: sdp-order-db
+        key: DB_USERNAME
+      - name: DB_PASSWORD
+        secretName: sdp-order-db
+        key: DB_PASSWORD
+      # The SAME Secret key user-service reads above.
+      - name: ORDER_SERVICE_CLIENT_SECRET
+        secretName: sdp-service-clients
+        key: ORDER_SERVICE_CLIENT_SECRET
+    extraEnv: []
+    autoscaling:
+      # Deliberately NOT autoscaled, for two independent reasons. Its consumers are
+      # capped by Kafka: no NewTopic bean exists in main code, so topics are
+      # auto-created at the broker default of ONE partition, and no listener sets
+      # concurrency -- so a second replica's consumers are assigned nothing and
+      # idle while adding a rebalance pause to every scale event. Scaling
+      # consumers is a partition-count change first, and the right autoscaler is
+      # then KEDA on consumer-group lag, not CPU, because a lagging consumer is not
+      # a busy one. And a CPU HPA would flap against the reaper's once-a-minute
+      # burst.
+      #
+      # If this is ever enabled, set outbox.scalePollInterval to false first: the
+      # chart derives OUTBOX_POLL_INTERVAL_MS from replicaCount, which an HPA
+      # makes meaningless. The chart fails the render on that combination rather
+      # than quietly computing from a number nothing respects.
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 4
+      targetCPUUtilizationPercentage: 70
+
+  # ---------------------------------------------------------------------------
+  payment-service:
+    enabled: true
+    port: 8085
+    runtime: servlet
+    ownsSchema: true
+    hasOutbox: true
+    hasKafkaListeners: false
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # Passed as SCHEDULER_POOL_SIZE. One thread per @Scheduled method, because the
+    # default of 1 means OutboxPublisher holding its transaction across a batch is
+    # time in which the cleanup job -- and, in order-service, the stuck-saga reaper --
+    # simply do not run at all. That reads as "the reaper is not running" and is
+    # really "it never got a thread". At shutdown it also means up to 2 tasks can be
+    # in flight in phase 1073741823, all waited for under one phase timeout.
+    schedulerPoolSize: 2
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 60
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        # Does little: the payment provider is a mock.
+        cpu: 300m
+        memory: 768Mi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 768Mi
+        ephemeral-storage: 1Gi
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_PAYMENT_HOST:5432/payment_db?sslmode=require"
+      # The mock provider's decline rule. Quoted deliberately: unquoted, YAML
+      # parses 10000.00 as a float and it renders into the ConfigMap as "10000".
+      PAYMENT_DECLINE_THRESHOLD: "10000.00"
+    secretEnv:
+      - name: DB_USERNAME
+        secretName: sdp-payment-db
+        key: DB_USERNAME
+      - name: DB_PASSWORD
+        secretName: sdp-payment-db
+        key: DB_PASSWORD
+    extraEnv: []
+    autoscaling:
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 4
+      targetCPUUtilizationPercentage: 70
+
+  # ---------------------------------------------------------------------------
+  delivery-service:
+    enabled: true
+    port: 8086
+    runtime: servlet
+    ownsSchema: true
+    hasOutbox: true
+    hasKafkaListeners: true
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    activeProcessorCount: 2
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # Passed as SCHEDULER_POOL_SIZE. One thread per @Scheduled method, because the
+    # default of 1 means OutboxPublisher holding its transaction across a batch is
+    # time in which the cleanup job -- and, in order-service, the stuck-saga reaper --
+    # simply do not run at all. That reads as "the reaper is not running" and is
+    # really "it never got a thread". At shutdown it also means up to 2 tasks can be
+    # in flight in phase 1073741823, all waited for under one phase timeout.
+    schedulerPoolSize: 2
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 60
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        cpu: 300m
+        memory: 768Mi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 768Mi
+        ephemeral-storage: 1Gi
+    config:
+      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_DELIVERY_HOST:5432/delivery_db?sslmode=require"
+    secretEnv:
+      - name: DB_USERNAME
+        secretName: sdp-delivery-db
+        key: DB_USERNAME
+      - name: DB_PASSWORD
+        secretName: sdp-delivery-db
+        key: DB_PASSWORD
+    extraEnv: []
+    autoscaling:
+      # Same one-partition ceiling as order-service.
+      enabled: false
+      minReplicas: 2
+      maxReplicas: 4
+      targetCPUUtilizationPercentage: 70
+
+  # ---------------------------------------------------------------------------
+  notification-service:
+    enabled: true
+    # A web port with no web API. notification-service has
+    # spring-boot-starter-web for Actuator only -- no controllers, no database
+    # (no spring-boot-starter-data-jpa, no postgresql driver) -- so its Service
+    # exists PURELY to be scraped: a role: endpoints ServiceMonitor has nothing to
+    # select without one, and skipping it removes this service from all 15
+    # dashboard panels silently. Easy to think it does not need one.
+    port: 8087
+    runtime: servlet
+    ownsSchema: false
+    hasOutbox: false
+    hasKafkaListeners: true
+    replicaCount: 1
+    image:
+      name: ""
+      tag: ""
+    service:
+      type: ClusterIP
+      annotations: {}
+    # The only service where one processor is honest: its entire job is to
+    # deserialize JSON and write a log line, across twelve listener containers.
+    # It also gets SerialGC in its Dockerfile for the same reason -- one thread is
+    # cheaper than G1's region bookkeeping when a 30ms pause is invisible -- and
+    # that choice is written down there precisely so a second CPU does not
+    # silently flip the collector back.
+    activeProcessorCount: 1
+    # Passed as SHUTDOWN_PHASE_TIMEOUT, which this service's application.yml reads
+    # into spring.lifecycle.timeout-per-shutdown-phase. Sized on the request drain,
+    # the only phase with legitimately long in-flight work.
+    shutdownPhaseTimeoutSeconds: 20
+    # = preStopSleepSeconds + 2 x shutdownPhaseTimeoutSeconds. The chart fails the
+    # render if it is less than that, because the three numbers are one decision.
+    terminationGracePeriodSeconds: 45
+    # 0 = no SCHEDULER_POOL_SIZE is emitted. This service carries no
+    # @EnableScheduling, and TaskSchedulingAutoConfiguration is conditional on the
+    # scheduled-annotation processor bean, so there is no scheduler here for the
+    # property to configure -- and config that cannot do anything is worse than
+    # config that is absent. Stated as a 0 rather than left out so the absence is
+    # visibly a decision.
+    schedulerPoolSize: 0
+    preStopSleepSeconds: 5
+    managementPort: 0
+    probes:
+      startup:
+        # No Flyway and no schema here, so this is a JVM-boot budget: 24 x 5s.
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 24
+        # A container that never finished starting has no in-flight work worth
+        # draining -- and if a startupProbe is failing, whatever is wrong is
+        # upstream of the request pipeline anyway -- so the pod-level budget is pure
+        # delay before the restart. Same probe-level override (Kubernetes 1.25+) as
+        # the liveness probe below.
+        terminationGracePeriodSeconds: 10
+      readiness:
+        # There is no Service in front of this for readiness to remove it from --
+        # nothing calls it, it only consumes. The probe still earns its place: it
+        # is what a rolling update waits on before replacing the next pod.
+        #
+        # And be clear about what these probes do NOT tell you. There is no Kafka
+        # health indicator on this classpath (Spring Boot ships none for Kafka,
+        # and plain spring-kafka contributes none), so this service reports UP
+        # whether or not it is consuming anything -- which is its only job. Adding
+        # one would be the wrong fix anyway: a broker outage is shared, so it
+        # would unready or restart every consumer at once. Consumer lag belongs on
+        # a metric and an alert.
+        periodSeconds: 5
+        timeoutSeconds: 3
+        failureThreshold: 3
+        successThreshold: 1
+      liveness:
+        periodSeconds: 10
+        timeoutSeconds: 3
+        failureThreshold: 6
+        terminationGracePeriodSeconds: 10
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+        ephemeral-storage: 256Mi
+      limits:
+        memory: 512Mi
+        ephemeral-storage: 1Gi
+    config: {}
+    # No credential of any kind: no database, no JWT, no service client.
+    secretEnv: []
+    extraEnv: []
+    autoscaling:
+      # Same one-partition ceiling as order-service, and more sharply: a second
+      # replica of a single-partition consumer group does nothing at all.
+      enabled: false
+      minReplicas: 1
+      maxReplicas: 2
+      targetCPUUtilizationPercentage: 70

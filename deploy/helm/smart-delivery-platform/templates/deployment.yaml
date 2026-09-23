@@ -1,0 +1,454 @@
+{{/*
+================================================================================
+One Deployment per enabled service, from one template.
+
+The services are deliberately uniform -- same base image shape, same actuator
+surface, same error contract and correlation filter out of platform-starter
+(ADR 009) -- so a shared template plus a values map is the honest representation.
+Eight near-identical subcharts would be eight copies to drift, and the first
+things to drift would be the ones that hurt most: the probe paths, the security
+context, the shutdown budget.
+================================================================================
+*/}}
+{{- include "sdp.validate" . }}
+{{- $root := . }}
+{{- $probePort := include "sdp.probePortName" . }}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $fullName := include "sdp.name" (dict "root" $root "name" $name) }}
+{{- $mgmtPort := int (default 0 $svc.managementPort) }}
+{{- $autoscaled := dig "autoscaling" "enabled" false $svc }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+spec:
+{{- if $autoscaled }}
+  # replicas is deliberately ABSENT while an HPA owns this Deployment. Setting it
+  # here means every `helm upgrade` writes the chart's number back and the HPA
+  # then scales away from it again -- a fight that shows up as a burst of pod
+  # churn on every deploy.
+{{- else }}
+  replicas: {{ int (default 1 $svc.replicaCount) }}
+{{- end }}
+  revisionHistoryLimit: 5
+  # 600s is the default, restated because it interacts with the startupProbe: the
+  # 300s startup budget below has to stay comfortably under it, or a pod that is
+  # legitimately still migrating gets reported as a failed rollout.
+  progressDeadlineSeconds: 600
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      # maxUnavailable 0 keeps full capacity through a rollout, and maxSurge 1 is
+      # what pays for it. This pairing is also the right answer to the large
+      # terminationGracePeriodSeconds below: a stuck pod can hold its slot for up
+      # to that long, and the fix for a slow rollout is surge, not cutting a
+      # budget that exists to keep SIGKILL off the table.
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "sdp.selectorLabels" (dict "root" $root "name" $name) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app: {{ $fullName }}
+        {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 8 }}
+        {{- include "sdp.metricsLabels" $svc | nindent 8 }}
+        {{- with $root.Values.pod.extraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        # Load-bearing, not hygiene. A ConfigMap consumed as env vars is injected
+        # at pod creation ONLY -- editing it changes nothing in a running pod, and
+        # unlike a mounted volume it never updates in place -- and Spring Boot
+        # binds configuration once at startup, with no Spring Cloud Kubernetes
+        # refresh anywhere in this platform. So EVERY configuration change here is
+        # a rollout, and these two hashes are what make that rollout automatic
+        # instead of dependent on somebody remembering `kubectl rollout restart`.
+        #
+        # Split in two on purpose: a change to sdp-common genuinely should roll all
+        # eight services, and a change to one service's own config should roll only
+        # that one.
+        #
+        # WHAT THESE DO NOT COVER: Secrets. They are created out of band (or by an
+        # External Secrets Operator), so nothing in these values changes when one
+        # is rotated and no pod restarts by itself. That is not an oversight -- the
+        # signing-key rotation in README.md is a deliberate two-rollout procedure
+        # precisely because the overlap window has to be controlled by a human.
+        # After rotating any other Secret: kubectl rollout restart deploy/{{ $fullName }}
+        checksum/config-common: {{ include (print $root.Template.BasePath "/configmap-common.yaml") $root | sha256sum }}
+        checksum/config-service: {{ toYaml (dict "config" (default (dict) $svc.config) "outbox" $root.Values.outbox "database" $root.Values.database "replicas" (default 1 $svc.replicaCount) "shutdown" $svc.shutdownPhaseTimeoutSeconds "schedulerPool" $svc.schedulerPoolSize) | sha256sum }}
+        {{- with $root.Values.pod.extraAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      # Nothing in this platform calls the Kubernetes API, so no pod needs a
+      # projected ServiceAccount token sitting in its filesystem.
+      automountServiceAccountToken: {{ $root.Values.pod.automountServiceAccountToken }}
+      {{- with $root.Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.pod.securityContext | nindent 8 }}
+      # ---- shutdown budget ---------------------------------------------------
+      # {{ $svc.preStopSleepSeconds }}s preStop + {{ $svc.shutdownPhaseTimeoutSeconds }}s for the request drain + {{ sub (int $svc.terminationGracePeriodSeconds) (add (int $svc.preStopSleepSeconds) (int $svc.shutdownPhaseTimeoutSeconds)) }}s of headroom for the
+      # remaining shutdown phases and bean destruction. This number, preStopSleepSeconds
+      # and SHUTDOWN_PHASE_TIMEOUT in this service's ConfigMap are ONE decision written
+      # in three places -- the application.yml that reads that env var says so in as many
+      # words -- and the chart fails the render if they disagree.
+      #
+      # spring.lifecycle.timeout-per-shutdown-phase bounds EACH SmartLifecycle phase
+      # independently, and there are always at least two: the graceful request drain
+      # (WebServerGracefulShutdownLifecycle) and the web-server stop
+      # (WebServerStartStopLifecycle) are separate phases, so even a service with nothing
+      # else in it has two.
+      {{- if $svc.hasKafkaListeners }}
+      # This one also has the Kafka listener-container phase
+      # (AbstractMessageListenerContainer, MAX-100), which stops BEFORE the drain.
+      {{- end }}
+      {{- if $svc.schedulerPoolSize }}
+      # ...and the @Scheduled pool phase (ExecutorConfigurationSupport, MAX/2), which
+      # waits for up to {{ $svc.schedulerPoolSize }} in-flight tasks under one phase timeout.
+      {{- end }}
+      {{- if or $svc.hasOutbox $svc.hasKafkaListeners }}
+      # ...and last, at Integer.MIN_VALUE, DefaultKafkaProducerFactory, whose stop()
+      # closes the shared producer with a 30s DEFAULT_PHYSICAL_CLOSE_TIMEOUT that Boot
+      # exposes no property to shrink. That ordering is correct as it stands -- the
+      # producer the outbox publishes through is the last thing closed, after the poller
+      # that uses it has stopped -- but it is why the pathological tail is long.
+      {{- end }}
+      #
+      # WHAT THIS DELIBERATELY DOES NOT COVER is every phase burning its whole budget
+      # with that producer close on top. Summing the worst cases would give something
+      # like 135s here, and a pod that reaches it is a pod that is STUCK -- so sizing for
+      # it would make every stuck pod hold a rollout slot for over two minutes, while a
+      # SIGKILL at that point is safe: an interrupted outbox batch rolls back to PENDING
+      # (ADR 006) and a claimed saga's lease expires so a peer picks it up (ADR 008). A
+      # realistic shutdown here is one or two seconds. The way to make the pathological
+      # case cheaper is to shrink its dominant term -- a ProducerFactory customizer
+      # calling setPhysicalCloseTimeout(5) in platform-starter -- not to inflate this.
+      terminationGracePeriodSeconds: {{ $svc.terminationGracePeriodSeconds }}
+      {{- if $root.Values.topologySpread.enabled }}
+      topologySpreadConstraints:
+        - maxSkew: {{ $root.Values.topologySpread.maxSkew }}
+          topologyKey: {{ $root.Values.topologySpread.hostnameKey }}
+          # ScheduleAnyway, NOT DoNotSchedule: on a one- or two-node cluster
+          # DoNotSchedule leaves pods Pending indefinitely, and "spread if you can"
+          # is what is actually wanted here.
+          whenUnsatisfiable: {{ $root.Values.topologySpread.whenUnsatisfiable }}
+          {{- with $root.Values.topologySpread.matchLabelKeys }}
+          # pod-template-hash keeps the OLD ReplicaSet's pods from counting against
+          # the NEW one's skew during a rollout, which otherwise stalls the rollout
+          # on a small cluster. Needs Kubernetes 1.27+; on anything older the field
+          # is dropped by the API server and the stall comes back silently, so set
+          # topologySpread.matchLabelKeys to [] there.
+          matchLabelKeys:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labelSelector:
+            matchLabels:
+              {{- include "sdp.selectorLabels" (dict "root" $root "name" $name) | nindent 14 }}
+        {{- if $root.Values.topologySpread.zoneSpread }}
+        - maxSkew: {{ $root.Values.topologySpread.maxSkew }}
+          topologyKey: {{ $root.Values.topologySpread.zoneKey }}
+          whenUnsatisfiable: {{ $root.Values.topologySpread.whenUnsatisfiable }}
+          {{- with $root.Values.topologySpread.matchLabelKeys }}
+          matchLabelKeys:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          labelSelector:
+            matchLabels:
+              {{- include "sdp.selectorLabels" (dict "root" $root "name" $name) | nindent 14 }}
+        {{- end }}
+      {{- end }}
+      {{- with $root.Values.pod.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.pod.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.pod.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        # REQUIRED, not optional, and it travels with readOnlyRootFilesystem
+        # below. Spring Boot's embedded Tomcat unconditionally creates
+        # ${java.io.tmpdir}/tomcat.<port>.<random> at startup, so the seven servlet
+        # services FAIL TO START without a writable /tmp. api-gateway gets it too,
+        # even though Netty needs no temp directory, because the JVM's hsperfdata
+        # file and the /tmp/.java_pid<n> attach socket that jcmd, jstack and jmap
+        # use live there -- without it the app runs and every live diagnostic is
+        # gone.
+        #
+        # A disk emptyDir with a sizeLimit, NOT medium: Memory. A tmpfs counts
+        # against the container's memory limit, and the JVM sized its heap from
+        # that same limit, so it would silently eat the heap budget.
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $root.Values.pod.tmpVolume.sizeLimit }}
+      containers:
+        - name: {{ $name }}
+          image: {{ include "sdp.image" (dict "root" $root "name" $name "svc" $svc) | quote }}
+          imagePullPolicy: {{ $root.Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $root.Values.pod.containerSecurityContext | nindent 12 }}
+          ports:
+            # The port name `http` is part of this platform's observability
+            # contract: one ServiceMonitor covers all eight services by selecting
+            # the port NAME, which is how the 8080..8087 spread never appears in
+            # the scrape config.
+            - name: http
+              containerPort: {{ $svc.port }}
+              protocol: TCP
+            {{- if gt $mgmtPort 0 }}
+            # A separate management connector, with its own thread pool, so probes
+            # and scrapes cannot be starved by application traffic. Read the
+            # comment on managementPort in values.yaml before relying on it: the
+            # main context's SecurityFilterChain does NOT apply to the management
+            # child context, so everything in
+            # management.endpoints.web.exposure.include is reachable
+            # UNAUTHENTICATED by anything that can reach this pod's IP. The
+            # NetworkPolicy is what bounds that, and this port is never routed
+            # through the Ingress.
+            - name: mgmt
+              containerPort: {{ $mgmtPort }}
+              protocol: TCP
+            {{- end }}
+          envFrom:
+            - configMapRef:
+                name: {{ include "sdp.configName" (dict "root" $root "name" "common") }}
+            - configMapRef:
+                name: {{ include "sdp.configName" (dict "root" $root "name" $name) }}
+          env:
+            # THE ONLY WAY TO PASS JVM FLAGS TO THESE IMAGES, and it has to be
+            # this variable. Every Dockerfile ends with
+            #   ENTRYPOINT ["/bin/sh", "-c", "exec java $JAVA_OPTS $JAVA_OPTS_APPEND -jar /app/app.jar"]
+            # so JAVA_OPTS_APPEND is appended to the image's baked defaults and
+            # wins on any flag it repeats -- retuning heap or GC is a value here,
+            # not a rebuild. A JAVA_OPTS value would REPLACE the image's whole set,
+            # including the MaxRAMPercentage that sizes the heap, so do not set it
+            # from a chart.
+            #
+            # ActiveProcessorCount lives here rather than in the image because it
+            # has to agree with resources.requests.cpu below, and two copies of one
+            # number in two files is a number that drifts. It has to be set
+            # somewhere: there is no CPU limit on any service in this chart (a CFS
+            # quota freezes every thread for the rest of its 100ms period once a GC
+            # plus JIT burst spends it), so there is no cgroup quota for the JVM to
+            # read, and since JDK 19 it ignores cpu.shares -- it would size GC
+            # threads, JIT threads and every ForkJoinPool from the NODE's core
+            # count, 64 on a large node for a pod given half a core.
+            - name: JAVA_OPTS_APPEND
+              value: {{ printf "-XX:ActiveProcessorCount=%v" $svc.activeProcessorCount | quote }}
+            {{- if gt $mgmtPort 0 }}
+            - name: MANAGEMENT_SERVER_PORT
+              value: {{ $mgmtPort | quote }}
+            {{- end }}
+            {{- if $root.Values.observability.ecsFieldsFromDownwardApi }}
+            # Recovers, for logs, the one thing this move takes away: the stable
+            # hostname that tied a log line to a process. Pod names churn on every
+            # rollout -- which is inherent to a Deployment, and why every dashboard
+            # panel aggregates by (job) -- but service.node.name here matches the
+            # `instance` label the ServiceMonitor relabels to the same pod name, so
+            # a metric anomaly and its log lines can be joined by one string. Set
+            # from the downward API rather than a placeholder in application.yml,
+            # so local development is untouched and there is no empty-value case.
+            - name: LOGGING_STRUCTURED_ECS_SERVICE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LOGGING_STRUCTURED_ECS_SERVICE_ENVIRONMENT
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            {{- end }}
+            {{- range $e := default (list) $svc.secretEnv }}
+            - name: {{ $e.name }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $e.secretName }}
+                  key: {{ $e.key }}
+            {{- end }}
+            {{- with $svc.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          # ---- probes ---------------------------------------------------------
+          # All three point at the two PROBE GROUPS, never at the aggregate
+          # /actuator/health. The aggregate includes the DataSource (and Redis in
+          # product-service, and circuitBreakers in order-service), and pointing a
+          # kubelet at it turns a Postgres blip into a platform-wide
+          # CrashLoopBackOff: every replica of every service fails the same probe
+          # inside one failureThreshold window, gets killed, and then cannot come
+          # back, because Flyway runs at boot and fails the context while the
+          # database is still unreachable. A dependency a restart cannot fix does
+          # not belong in liveness. The aggregate is kept exactly as it was for
+          # docker-compose's depends_on and for a human with kubectl.
+          #
+          # PREREQUISITE, and the chart cannot check it: these paths are only
+          # reachable if the six services with a SecurityConfig permit them.
+          # requestMatchers("/actuator/health") matches that path and NOTHING
+          # below it, so without /actuator/health/liveness and
+          # /actuator/health/readiness in PUBLIC_ENDPOINTS the kubelet gets a 401,
+          # reads it as a failed probe, and every one of those six services
+          # restarts on a failureThreshold cadence forever while api-gateway and
+          # notification-service (no security starter, no filter chain) stay up --
+          # a CrashLoopBackOff that looks like a cluster fault and is a one-line
+          # authorization problem. README.md lists this first under
+          # "Prerequisites in the application config".
+          startupProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: {{ $probePort }}
+            # No initialDelaySeconds anywhere in this chart. The startupProbe
+            # failing while the service boots IS the mechanism, not a nuisance to
+            # be delayed past, and it suppresses the liveness and readiness probes
+            # entirely until it first succeeds -- which is what keeps Flyway from
+            # being killed mid-migration. Two independent reasons that matters:
+            # Flyway runs during bean initialization, before finishRefresh() opens
+            # the port, so a probe gets connection-refused; and even once the port
+            # is open, /actuator/health/liveness returns 503 until
+            # ApplicationStartedEvent, because ApplicationAvailability defaults
+            # livenessState to BROKEN.
+            periodSeconds: {{ $svc.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ $svc.probes.startup.timeoutSeconds }}
+            # {{ $svc.probes.startup.failureThreshold }} x {{ $svc.probes.startup.periodSeconds }}s = {{ mul (int $svc.probes.startup.failureThreshold) (int $svc.probes.startup.periodSeconds) }}s of budget.
+            failureThreshold: {{ $svc.probes.startup.failureThreshold }}
+            {{- with $svc.probes.startup.terminationGracePeriodSeconds }}
+            terminationGracePeriodSeconds: {{ . }}
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: {{ $probePort }}
+            # readinessState only: the application has started and is not shutting
+            # down. Postgres, Kafka and Redis are deliberately absent, and it was
+            # the hardest call in the design. Gating readiness on a SHARED
+            # dependency sounds right, but every replica points at the same
+            # database, so the failure is never per-pod: all replicas would fail
+            # together, the EndpointSlice would drop to zero endpoints, and callers
+            # would get a connection-level failure with NO RESPONSE BODY instead of
+            # the 503-with-a-correlation-id that platform-starter's error contract
+            # exists to produce. Readiness-based removal only pays when some
+            # replicas are healthy and traffic can move to them.
+            #
+            # The failure this accepts, stated plainly: a pod whose OWN database
+            # connectivity is broken while its peers are fine stays in rotation and
+            # serves 503s for its share of traffic. That is visible on the
+            # per-service error-rate panel and in the correlation ids, and it is
+            # left as a human decision.
+            periodSeconds: {{ $svc.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ $svc.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ $svc.probes.readiness.failureThreshold }}
+            successThreshold: {{ $svc.probes.readiness.successThreshold }}
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: {{ $probePort }}
+            # livenessState only, which is close to a constant UP -- and that is
+            # the point. What is actually under test is the machinery around the
+            # constant: the port is open, a request thread is free, and the JVM
+            # completed a response inside timeoutSeconds. That catches exactly the
+            # failures a restart fixes -- a wedged thread pool, GC thrash on the
+            # way to an OOM, a deadlock -- and nothing else.
+            #
+            # {{ $svc.probes.liveness.failureThreshold }} x {{ $svc.probes.liveness.periodSeconds }}s = {{ mul (int $svc.probes.liveness.failureThreshold) (int $svc.probes.liveness.periodSeconds) }}s of consecutive failure before a restart.
+            # Generous on purpose: the commonest cause of a miss is a transient GC
+            # pause, while a restart is destructive (cold Hikari pool, cold JWKS
+            # cache, a Kafka consumer-group rebalance), so it should take a minute
+            # of sustained unresponsiveness rather than thirty seconds of bad luck.
+            periodSeconds: {{ $svc.probes.liveness.periodSeconds }}
+            {{- if eq $probePort "http" }}
+            # NOTE: this probe is served by the SAME thread pool as application
+            # traffic. See SPRING_DATASOURCE_HIKARI_CONNECTION_TIMEOUT in this
+            # service's ConfigMap for why that matters and what bounds it.
+            {{- end }}
+            timeoutSeconds: {{ $svc.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ $svc.probes.liveness.failureThreshold }}
+            {{- with $svc.probes.liveness.terminationGracePeriodSeconds }}
+            # A container that failed liveness is BY DEFINITION one whose graceful
+            # shutdown cannot complete -- a wedged thread pool or GC thrash is
+            # exactly what stops the drain phase finishing -- so the pod-level
+            # budget above buys nothing here and costs the whole
+            # detection-to-replacement window. This probe-level override
+            # (Kubernetes 1.25+) cuts it to {{ . }}s. The pod-level number still
+            # governs an ordinary deletion, where the drain is worth waiting for.
+            terminationGracePeriodSeconds: {{ . }}
+            {{- end }}
+          lifecycle:
+            preStop:
+              # Keeps the pod serving NORMALLY for {{ $svc.preStopSleepSeconds }}
+              # seconds after it has been told to die. The kubelet runs preStop to
+              # completion and only then sends SIGTERM, so this is a delay before
+              # shutdown STARTS, not a delay before it becomes useful.
+              #
+              # What it is for: on deletion the pod's EndpointSlice entry is marked
+              # terminating promptly (that, not the readiness probe, is what stops
+              # new traffic on modern Kubernetes), but every kube-proxy, CNI,
+              # ingress controller and mesh sidecar still has to observe that
+              # update and reprogram iptables or ipvs. That propagation is
+              # asynchronous and unbounded -- typically 100ms to 2s, worse on a
+              # large cluster -- and in that window traffic still arrives at a pod
+              # whose acceptor has already closed, so the client gets a TCP reset
+              # rather than a clean 503. For a non-idempotent POST /api/v1/orders
+              # that is not safely retryable by the caller.
+              #
+              # WHAT IT DOES NOT COVER, because it is easy to assume it does:
+              # pooled keep-alive connections. Those are pinned to one pod through
+              # conntrack, so neither endpoint removal nor this sleep touches them
+              # -- and keeping the socket healthy for five extra seconds makes a
+              # late lease MORE likely, not less. That case is handled from the
+              # other end, by the connection-pool eviction settings in
+              # api-gateway's ConfigMap.
+              {{- if $root.Values.lifecycle.preStopUseNativeSleep }}
+              # The native sleep action (Kubernetes 1.30+, GA 1.32) needs no shell
+              # in the image. Set lifecycle.preStopUseNativeSleep=false on an older
+              # cluster for the exec form.
+              sleep:
+                seconds: {{ $svc.preStopSleepSeconds }}
+              {{- else }}
+              # BusyBox sleep from eclipse-temurin:21-jre-alpine, which needs no
+              # privileges and works as UID 1000. It would stop working on a
+              # distroless base.
+              exec:
+                command: ["sh", "-c", "sleep {{ $svc.preStopSleepSeconds }}"]
+              {{- end }}
+          resources:
+            # NO CPU LIMIT, on any service, deliberately. A CPU limit is a CFS
+            # quota over a 100ms period summed across ALL threads: a G1 young
+            # collection with two parallel GC threads plus a C2 compilation can
+            # exhaust it, after which every thread is frozen until the next period.
+            # Median latency looks fine, p99 falls off a cliff, and nothing in the
+            # application's own metrics explains it -- the signal is
+            # container_cpu_cfs_throttled_periods_total, which is not on the
+            # Grafana dashboard today. It is worst at startup, where class loading
+            # and JIT are the most CPU-hungry the process ever gets, so a tight
+            # limit also stretches boot and makes rolling deploys flap.
+            #
+            # If a LimitRange or a Gatekeeper policy rejects a container with no
+            # CPU limit, the fallback is roughly 4x the request -- which pushes
+            # throttling out to the tail rather than removing it -- and then
+            # -XX:ActiveProcessorCount should be REMOVED from JAVA_OPTS_APPEND
+            # above, because the quota gives the JVM a correct number to read.
+            #
+            # MEMORY REQUEST == LIMIT, and for a JVM that is right for an unusually
+            # strong reason: -XX:MaxRAMPercentage sizes the heap from the LIMIT, so
+            # a gap is memory the JVM has already committed to using and the
+            # scheduler has not reserved. Request 512Mi / limit 1Gi and the JVM
+            # sizes a 600MB heap, the scheduler packs the node against 512Mi, and
+            # the pod is OOMKilled the first time it grows into memory that was
+            # never there.
+            {{- toYaml $svc.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+{{- end }}
+{{- end }}
