@@ -249,7 +249,7 @@ can be run directly: PostgreSQL 16, Redis 7.0, and a single-node Kafka 3.9 broke
 were installed and started in the sandbox, and **every** `*IntegrationTest` in the
 platform was executed against them — one class at a time, each against a freshly
 formatted broker and a freshly created database, by pointing a throwaway copy of the
-class at `localhost` instead of at a container. All of them passed (twelve classes at the time; two more were added in Phase 17 and run the same way):
+class at `localhost` instead of at a container. All of them passed (twelve classes at the time; two more were added in Phase 17 and one in Phase 21, run the same way):
 
 | Test class | Tests |
 |---|---|
@@ -266,6 +266,7 @@ class at `localhost` instead of at a container. All of them passed (twelve class
 | `OutboxConcurrencyIntegrationTest` | 3 |
 | `OutboxCleanupIntegrationTest` | 3 |
 | `OutboxEventRepositoryIntegrationTest` | 6 |
+| `ConcurrentIdempotentCreateIntegrationTest` | 1 |
 | `NotificationEventListenerIntegrationTest` | 3 |
 
 Those throwaway copies were scaffolding and are not committed; the committed tests are
