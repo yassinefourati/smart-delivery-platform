@@ -36,7 +36,7 @@
         <maven.compiler.release>21</maven.compiler.release>
 
         <spring-boot.version>3.5.13</spring-boot.version>
-        <spring-cloud.version>2025.0.2</spring-cloud.version>
+        <spring-cloud.version>2025.1.2</spring-cloud.version>
 
         <!-- Libraries added incrementally as each service's phase is implemented -->
         <springdoc-openapi.version>2.8.5</springdoc-openapi.version>
