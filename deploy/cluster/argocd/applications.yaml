@@ -1,0 +1,101 @@
+# =============================================================================
+# GitOps (Phase 22): the cluster converges on what main says, and ONLY main.
+#
+# Why GitOps is a security control and not just a convenience: nobody -- no laptop,
+# no CI runner -- holds credentials that can change production directly. CI's job
+# ends at "signed image in the registry + commit to main"; Argo CD pulls. A change
+# that is not in git is reverted by selfHeal within minutes, which turns drift (and
+# an attacker's `kubectl edit`) into an alert and a revert rather than a mystery.
+#
+# Rollback is `git revert` of the image-tag bump, not `kubectl`: the audit trail and
+# the rollback are the same object. Argo Rollouts handles the automated in-flight
+# abort (the app chart's canary analysis) before a bad version ever reaches 100%.
+#
+# Sync waves: the database tier first (wave 0), the application after (wave 1), so
+# a fresh cluster never starts services against a database that does not exist yet.
+# =============================================================================
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: sdp
+  namespace: argocd
+spec:
+  description: Smart Delivery Platform
+  sourceRepos:
+    - https://github.com/yassinefourati/smart-delivery-platform.git
+  destinations:
+    - server: https://kubernetes.default.svc
+      namespace: sdp
+    - server: https://kubernetes.default.svc
+      namespace: sdp-data
+  # Namespaced resources only: the charts cannot create ClusterRoles, CRDs or
+  # webhooks, even if someone edits them to. Cluster-scoped objects come from
+  # deploy/cluster/, applied by the platform team.
+  clusterResourceWhitelist: []
+  namespaceResourceBlacklist:
+    - group: ""
+      kind: ResourceQuota
+    - group: ""
+      kind: LimitRange
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: sdp-data
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+spec:
+  project: sdp
+  source:
+    repoURL: https://github.com/yassinefourati/smart-delivery-platform.git
+    targetRevision: main
+    path: deploy/helm/sdp-data
+    helm:
+      valueFiles:
+        - values.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sdp-data
+  syncPolicy:
+    automated:
+      # NO prune for the database tier: deleting a Cluster object deletes the
+      # database. Removing one must be a deliberate, manual act.
+      prune: false
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+      - PruneLast=true
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: smart-delivery-platform
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "1"
+spec:
+  project: sdp
+  source:
+    repoURL: https://github.com/yassinefourati/smart-delivery-platform.git
+    targetRevision: main
+    path: deploy/helm/smart-delivery-platform
+    helm:
+      valueFiles:
+        - values-production.yaml
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: sdp
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - ServerSideApply=true
+  # The Deployment of a service under Argo Rollouts is scaled to 0 by the chart and
+  # owned by the Rollout; without this Argo CD would fight the Rollout over replicas.
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas

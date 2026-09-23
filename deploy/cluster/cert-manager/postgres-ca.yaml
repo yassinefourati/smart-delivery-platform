@@ -1,0 +1,70 @@
+# =============================================================================
+# The private CA for PostgreSQL server certificates, and its distribution
+# (Phase 22). Chain:
+#
+#   ClusterIssuer sdp-selfsigned-bootstrap   (only signs the CA below)
+#     -> Certificate sdp-postgres-ca-root    (the CA, in cert-manager's namespace)
+#       -> ClusterIssuer sdp-postgres-ca     (issues each cluster's server cert:
+#                                             deploy/helm/sdp-data/templates/certificate.yaml)
+#   trust-manager Bundle sdp-postgres-ca     (copies ca.crt, and ONLY ca.crt, as a
+#                                             ConfigMap into every namespace labelled
+#                                             sdp.io/postgres-client=true -- which the
+#                                             services mount as sslrootcert)
+#
+# Why trust-manager: a pod can only mount a Secret/ConfigMap from its own namespace,
+# and the CA must never travel as the Secret (that Secret holds the CA's private key).
+#
+# In a regulated environment, replace the self-signed root with AWS Private CA
+# (aws-privateca-issuer) -- same ClusterIssuer name, nothing else changes.
+# =============================================================================
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: sdp-selfsigned-bootstrap
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: sdp-postgres-ca-root
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: sdp-postgres-ca
+  secretName: sdp-postgres-ca-root
+  # Ten years for the root; the leaf certificates are 90 days and rotate their keys.
+  duration: 87600h
+  privateKey:
+    algorithm: ECDSA
+    size: 384
+  issuerRef:
+    name: sdp-selfsigned-bootstrap
+    kind: ClusterIssuer
+    group: cert-manager.io
+---
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: sdp-postgres-ca
+spec:
+  ca:
+    secretName: sdp-postgres-ca-root
+---
+apiVersion: trust.cert-manager.io/v1alpha1
+kind: Bundle
+metadata:
+  # Also the name of the ConfigMap it writes, which the app chart's
+  # database.tls.caConfigMap points at.
+  name: sdp-postgres-ca
+spec:
+  sources:
+    - secret:
+        name: sdp-postgres-ca-root
+        key: ca.crt
+  target:
+    configMap:
+      key: ca.crt
+    namespaceSelector:
+      matchLabels:
+        sdp.io/postgres-client: "true"

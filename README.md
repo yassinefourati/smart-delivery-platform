@@ -86,6 +86,9 @@ mvn clean install
 - [Testing](docs/testing.md)
 - [CI/CD](docs/ci-cd.md)
 - [Kubernetes](docs/kubernetes.md)
+- [Security hardening and resilience](docs/security-hardening.md) -- runbooks:
+  [incident response](docs/runbooks/incident-response.md),
+  [rollback and disaster recovery](docs/runbooks/disaster-recovery.md)
 - [Frontend](docs/frontend.md)
 - [Local development](docs/local-development.md)
 - [Architecture Decision Records](docs/adr)
@@ -448,6 +451,62 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       three web-tier assertions in the smoke test. The Docker image itself was not built
       here (no Docker daemon); CI builds and scans it. See
       [docs/frontend.md](docs/frontend.md).
+- [x] **Phase 22 -- Production security and resilience**
+      ([ADR 014](docs/adr/014-production-security-and-resilience.md),
+      [docs/security-hardening.md](docs/security-hardening.md)). The platform can now be
+      defended and recovered, not just deployed. Four pieces:
+  - **The application chart** gains:
+    - egress allow-lists per service, and a namespace default-deny;
+    - a quarantine label that every allow policy excludes, so one `kubectl label` cuts
+      a pod off while keeping it for forensics. CI fails if a policy forgets the
+      exclusion;
+    - ExternalSecrets from AWS Secrets Manager;
+    - `sslmode=verify-full` against a private CA;
+    - separate Flyway credentials, so the runtime pool no longer owns its schema;
+    - security alerts routed by `category`;
+    - Argo Rollouts canaries for order-service that abort themselves on the canary's
+      5xx ratio.
+  - **A new `deploy/helm/sdp-data` chart** puts each service's database on
+    CloudNativePG:
+    - three instances across three zones, with quorum synchronous replication;
+    - TLS-only `pg_hba`, SCRAM, and no superuser password;
+    - an owner/DML-only role split, and pgAudit;
+    - continuous WAL archiving plus daily base backups to an Object-Locked,
+      KMS-encrypted bucket whose writer role cannot delete;
+    - point-in-time recovery declared in git (`recoverFrom`);
+    - a DR-region replica mode.
+  - **`deploy/cluster/`** is the cluster baseline:
+    - Pod Security `restricted`;
+    - least-privilege RBAC with break-glass;
+    - Kyverno verifying keyless cosign signatures and SBOM attestations from this
+      repo's main-branch CI, plus registry and tag rules;
+    - Falco with SDP rules (a JVM spawning a shell is the one that matters);
+    - ESO, cert-manager and trust-manager, Velero, Argo CD, Alertmanager routing and
+      Loki detection rules;
+    - an immutable backup-bucket script.
+  - **CI** signs every published digest keylessly and attaches a signed SPDX SBOM. A
+    new `k8s-manifests` job runs `scripts/validate-k8s.sh`, which:
+    - lints and renders both charts in 7 modes;
+    - validates 333 objects plus the 25-object bundle against the Kubernetes **and CRD**
+      schemas, with nothing skipped;
+    - fires 11 chart guards;
+    - parses every Prometheus and Loki rule;
+    - runs the Kyverno policies against the production render, both positively and
+      negatively.
+
+  The database role split was exercised against real PostgreSQL with user-service's
+  own migrations and traffic. Flyway ran as the owner, which owns every table; the
+  runtime role could read and write but was refused `CREATE`, `DROP` and `TRUNCATE`.
+  Two runbooks turn all this into procedures:
+  [incident response](docs/runbooks/incident-response.md) and
+  [rollback, recovery and DR](docs/runbooks/disaster-recovery.md), the latter with
+  RTO/RPO targets and a restore-drill log.
+
+  **Nothing here has been applied to a cluster or made a real AWS call.** No failover,
+  backup or restore has run; the Falco rules are syntax-checked in CI but have not been
+  fired; one metric name (Barman's backup age) comes from documentation and has an
+  "absent" alert in case it's wrong. The first staging install and the first restore
+  drill are the tests of the rest.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

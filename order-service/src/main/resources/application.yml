@@ -56,6 +56,12 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # Migrations may run as a separate, schema-owning role while the application
+    # runs as a DML-only one (deploy/helm/sdp-data, docs/security-hardening.md), so a
+    # compromised pod cannot DROP or ALTER what it serves. Both default to the
+    # runtime credentials, so nothing changes until DB_MIGRATION_* are set.
+    user: ${DB_MIGRATION_USERNAME:${spring.datasource.username}}
+    password: ${DB_MIGRATION_PASSWORD:${spring.datasource.password}}
     # Kubernetes has no depends_on, so a pod scheduled before Postgres is up would
     # crash-loop. The interval must be set with the count: Boot's default is 120s.
     connect-retries: ${FLYWAY_CONNECT_RETRIES:10}

@@ -1,0 +1,55 @@
+# =============================================================================
+# Alert routing (Phase 22). Every alert in the charts carries a `category` label;
+# this sends them where someone acts on them:
+#
+#   security        -> the security on-call, immediately, grouped per alert name
+#                      (auth-failure spikes, forbidden spikes, busy-without-traffic
+#                      i.e. possible crypto-mining, Falco criticals)
+#   recoverability  -> the platform on-call: failing WAL archiving or stale backups
+#                      are silent data-loss risk, not "warnings"
+#   everything else -> the default receiver of the Alertmanager this merges into
+#
+# Receivers are webhooks so this validates without secrets; point them at
+# PagerDuty/Opsgenie/Slack (the Secret named below holds the URL).
+# =============================================================================
+apiVersion: monitoring.coreos.com/v1alpha1
+kind: AlertmanagerConfig
+metadata:
+  name: sdp-routing
+  namespace: observability
+  labels:
+    alertmanagerConfig: sdp
+spec:
+  route:
+    receiver: sdp-platform-oncall
+    groupBy: [alertname, namespace]
+    groupWait: 30s
+    groupInterval: 5m
+    repeatInterval: 4h
+    routes:
+      - receiver: sdp-security-oncall
+        matchers:
+          - name: category
+            value: security
+            matchType: "="
+        groupWait: 0s
+        repeatInterval: 1h
+      - receiver: sdp-platform-oncall
+        matchers:
+          - name: category
+            value: recoverability
+            matchType: "="
+        repeatInterval: 1h
+  receivers:
+    - name: sdp-security-oncall
+      webhookConfigs:
+        - urlSecret:
+            name: sdp-alert-webhooks
+            key: security
+          sendResolved: true
+    - name: sdp-platform-oncall
+      webhookConfigs:
+        - urlSecret:
+            name: sdp-alert-webhooks
+            key: platform
+          sendResolved: true

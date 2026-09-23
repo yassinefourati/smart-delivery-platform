@@ -1,0 +1,66 @@
+# =============================================================================
+# Only images CI built, scanned, signed and attested may run in the application
+# namespace (Phase 22, ADR 014).
+#
+# The chain this closes: the registry is not trusted. Anyone who can push to GHCR (a
+# leaked token, a compromised dependency in a workflow) can publish an image under
+# our name; a signature is what ties an image to THIS repository's main-branch CI run.
+# CI signs keyless (.github/workflows/ci.yml: cosign with the workflow's OIDC token),
+# so there is no signing key to steal -- the identity below is the workflow itself,
+# recorded in the Rekor transparency log.
+#
+#   subject  the workflow file AND the ref: an image signed by a PR build, a fork or
+#            another workflow does not match.
+#   SBOM     the image must also carry a signed SPDX attestation (same identity),
+#            so every running image has a known, queryable bill of materials for the
+#            next "are we affected by CVE-X?" question.
+#
+# mutateDigest rewrites the pod's image to the verified digest, so the kubelet runs
+# exactly the bytes that were verified even if the tag moves afterwards.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sdp-verify-image-signatures
+  annotations:
+    policies.kyverno.io/title: Verify SDP image signatures and SBOM attestations
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: high
+spec:
+  # Verification calls out to the registry and Rekor; allow for it.
+  webhookTimeoutSeconds: 30
+  # Fail closed: if Kyverno is down, pods are not admitted unverified.
+  failurePolicy: Fail
+  background: false
+  rules:
+    - name: signed-by-main-ci
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  sdp.io/workload-policy: enforced
+      verifyImages:
+        - imageReferences:
+            - "ghcr.io/yassinefourati/smart-delivery-platform/*"
+          failureAction: Enforce
+          mutateDigest: true
+          verifyDigest: true
+          required: true
+          attestors:
+            - entries:
+                - keyless:
+                    issuer: https://token.actions.githubusercontent.com
+                    subject: https://github.com/yassinefourati/smart-delivery-platform/.github/workflows/ci.yml@refs/heads/main
+                    rekor:
+                      url: https://rekor.sigstore.dev
+          attestations:
+            - type: https://spdx.dev/Document
+              attestors:
+                - entries:
+                    - keyless:
+                        issuer: https://token.actions.githubusercontent.com
+                        subject: https://github.com/yassinefourati/smart-delivery-platform/.github/workflows/ci.yml@refs/heads/main
+                        rekor:
+                          url: https://rekor.sigstore.dev

@@ -1,0 +1,14 @@
+# Point-in-time recovery of order-db into a NEW cluster, order-db-pitr, as of just before
+# 14:05 UTC. Used as-is by scripts/validate-k8s.sh; the procedure around it is in
+# docs/runbooks/disaster-recovery.md#point-in-time-recovery.
+clusters:
+  order-db-pitr:
+    enabled: true
+    database: order_db
+    ownerRole: order_owner
+    appRole: order_app
+    client: order-service
+    secretPrefix: prod/sdp/order-service
+    recoverFrom:
+      cluster: order-db
+      targetTime: "2026-09-23T14:05:00Z"

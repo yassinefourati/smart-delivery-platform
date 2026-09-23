@@ -92,7 +92,10 @@ laptop and the wrong shape for anything with a user on it.
 
 Two consequences that will bite on a first install:
 
-1. **Somebody has to create six databases and six roles.** Flyway migrates
+1. **Somebody has to create six databases and their roles** -- since Phase 22,
+   [`deploy/helm/sdp-data`](../sdp-data/README.md) does it on CloudNativePG (one HA
+   cluster per service, an owner role for Flyway and a DML-only runtime role). Without
+   it, by hand: Flyway migrates
    *within* a database; it does not create the database or the role, and
    `infrastructure/postgres/init-databases.sh` is a Compose entrypoint hook that no
    cluster ever runs. Left undone, the first deploy fails at datasource
@@ -128,6 +131,22 @@ platform calls the Kubernetes API, and every pod sets
 that cert-manager or a human provides.
 
 ---
+
+## Production security (Phase 22)
+
+All off in `values.yaml`, on in `values-production.yaml`; the reasoning is in
+[docs/security-hardening.md](../../../docs/security-hardening.md) and
+[ADR 014](../../../docs/adr/014-production-security-and-resilience.md).
+
+| Values | What it renders |
+|---|---|
+| `networkPolicy.restrictEgress`, `.defaultDenyNamespace`, `.egress.*` | One egress allow-list per service (DNS, its own CNPG cluster, its Kafka/Redis peers, OTLP) and a namespace default-deny. The guards refuse a schema-owning service with no Postgres target, or a Kafka/Redis user with no peers. |
+| `networkPolicy.quarantineLabel` | A deny-all policy for pods carrying the label, excluded from every allow policy so it actually isolates (policies are additive). `scripts/validate-k8s.sh` fails if a new allow policy forgets the exclusion. Procedure: [incident runbook](../../../docs/runbooks/incident-response.md#contain). |
+| `externalSecrets.*` | An `ExternalSecret` per Secret, same names as `secretEnv` references, so nothing else changes. Refused together with `secrets.create`, and refused if a `secretEnv` Secret has no entry. |
+| `database.tls.*` | Mounts the CA ConfigMap trust-manager distributes; the guard refuses any `DB_URL` without `sslmode=verify-full` and `sslrootcert`. |
+| `DB_MIGRATION_USERNAME/PASSWORD` in `secretEnv` | Flyway connects as the schema owner, the pool as the DML-only role (`spring.flyway.user/password`, defaulting to the datasource credentials, so Compose and tests are unchanged). |
+| `observability.prometheusRule.securityRules` | `SdpAuthFailureSpike`, `SdpForbiddenSpike`, `SdpBusyWithoutTraffic`, `SdpConcurrentOrderReplays`, labelled `category: security`. |
+| `rollouts.*` | An Argo Rollouts `Rollout` (via `workloadRef`; the Deployment is scaled to 0) with 25/50/75% steps and an `AnalysisTemplate` on the canary pods' 5xx ratio, which aborts the rollout by itself. Refused for a service that also has an HPA. |
 
 ## Kubernetes version
 

@@ -1,0 +1,39 @@
+# =============================================================================
+# Every container declares CPU and memory requests and a memory limit. Without
+# requests the scheduler packs blind and a noisy neighbour starves the platform;
+# without a memory limit one leaking JVM takes the node's memory, and the kernel's
+# OOM killer picks the victim instead of the kubelet. (No CPU limit is required: CPU
+# is compressible, and a limit mostly adds throttling -- the chart sets one where it
+# matters.) Audit first: roll out, read the policy reports, then flip to Enforce.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sdp-require-requests-limits
+  annotations:
+    policies.kyverno.io/title: Require requests and memory limits
+    policies.kyverno.io/category: Resilience
+    policies.kyverno.io/severity: medium
+spec:
+  background: true
+  rules:
+    - name: requests-and-memory-limit
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  sdp.io/workload-policy: enforced
+      validate:
+        failureAction: Audit
+        message: "Set resources.requests.cpu, resources.requests.memory and resources.limits.memory on every container."
+        pattern:
+          spec:
+            containers:
+              - resources:
+                  requests:
+                    cpu: "?*"
+                    memory: "?*"
+                  limits:
+                    memory: "?*"

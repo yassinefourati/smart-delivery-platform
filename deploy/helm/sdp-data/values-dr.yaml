@@ -1,0 +1,27 @@
+# =============================================================================
+# The DR region (Phase 22, ADR 014). Install alongside the primary region's release:
+#
+#   helm upgrade --install sdp-data deploy/helm/sdp-data -n sdp-data \
+#     -f values-dr.yaml --kube-version <dr cluster version>
+#
+# Each cluster bootstraps from the primary region's newest base backup and then
+# replays its WAL archive continuously -- a warm standby region, read-only, a few
+# minutes behind at most (archive_timeout + the S3 replication delay). The primary
+# region's backup bucket is replicated here by S3 Cross-Region Replication
+# (deploy/cluster/backup-bucket/create-backup-bucket.sh sets it up).
+#
+# PROMOTION is a decision, not an automatic failover: two writable regions for the
+# same data is worse than a short outage. docs/runbooks/disaster-recovery.md has
+# the procedure; the switch itself is dr.promoted=true.
+# =============================================================================
+mode: replica
+
+dr:
+  sourceDestinationPath: s3://REPLACE_ME-sdp-pg-backups-dr-replica/
+  promoted: false
+
+backup:
+  # This region's OWN archive, used once promoted. Never the replicated source
+  # above: two clusters archiving into one prefix corrupt each other's timeline.
+  destinationPath: s3://REPLACE_ME-sdp-pg-backups-dr/
+  irsaRoleArn: arn:aws:iam::REPLACE_ME_ACCOUNT:role/sdp-pg-backup-dr

@@ -36,13 +36,25 @@
   can only break in the production nginx. See [the section below](#end-to-end-smoke-test).
 - **`compose-config`** — `docker compose config --quiet`, validating `docker-compose.yml`
   parses and every variable substitution resolves, on every push and PR.
-- **`helm-chart`** (Phase 20) — `helm lint`, then `helm template` with the default values
-  and with `values-production.yaml`, then `kubeconform -strict` against the published
-  Kubernetes API schemas, and finally a deliberately **unsafe** render that must fail:
-  the chart's grace-period guard has to refuse a `terminationGracePeriodSeconds` below
-  `preStop + 2 x timeout-per-shutdown-phase`. A guard nobody fires is a guard nobody
-  knows still works. The Prometheus Operator CRDs have no published schema, so
-  kubeconform skips those two objects rather than failing on them.
+- **`k8s-manifests`** (Phase 20 as `helm-chart`, widened in Phase 22) — runs
+  [`scripts/validate-k8s.sh`](../scripts/validate-k8s.sh), the same script a developer
+  runs locally:
+  - `helm lint`, with every values file, for both charts: the application chart and
+    `deploy/helm/sdp-data`.
+  - Six renders: app defaults, placeholders and production; sdp-data primary, DR replica
+    and DR promoted.
+  - `kubeconform -strict` over all of them and over `deploy/cluster/`, against the
+    Kubernetes schemas **and the real CRD schemas** from the datreeio CRDs-catalog.
+    Nothing is skipped any more; before Phase 22 the Prometheus Operator objects were.
+  - Nine deliberately unsafe renders that must be refused, each checked for its message.
+    A guard nobody fires is a guard nobody knows still works.
+  - The alert rules must parse: `promtool check rules` for the Prometheus rules,
+    `lokitool rules lint` for the Loki ones.
+  - The Kyverno admission policies must admit the production render and refuse a
+    `:latest` render and a foreign-registry render.
+  - `shellcheck` over the operational scripts.
+  - `falco -V`, which loads the custom Falco rules against Falco's default ruleset in the
+    official image.
 
 ## Published images
 
@@ -51,6 +63,31 @@
 `frontend`, published on every push to `main`. No extra registry secret is needed — GHCR accepts the workflow's own
 automatic `GITHUB_TOKEN`, scoped to `packages: write` at the job level only (every other
 job, and every step in this job before the publish, only needs `contents: read`).
+
+**Signed, with an SBOM (Phase 22).** On every push to `main` there are three more steps
+after the push:
+1. `cosign sign` signs the pushed **digest**, never a tag, which can move.
+2. `cosign attest` attaches an SPDX SBOM that Trivy generates from the same image.
+3. `cosign verify` checks the result.
+
+Signing is keyless. cosign trades the job's OIDC token (`id-token: write`, on this job
+only) for a short-lived Sigstore certificate that names this workflow and ref, and
+records the signature in the Rekor transparency log. So there is no signing key to store,
+rotate or leak. In the cluster,
+[`deploy/cluster/kyverno/verify-image-signatures.yaml`](../deploy/cluster/kyverno/verify-image-signatures.yaml)
+admits an image into `sdp` only if it carries a signature and an SBOM attestation from
+exactly `.github/workflows/ci.yml@refs/heads/main`. It also pins the pod to the verified
+digest. cosign is 2.x on purpose: 3.x defaults to the new Sigstore bundle format, and the
+policy verifies the classic one.
+
+To check an image by hand:
+
+```bash
+cosign verify ghcr.io/yassinefourati/smart-delivery-platform/order-service:<sha> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity https://github.com/yassinefourati/smart-delivery-platform/.github/workflows/ci.yml@refs/heads/main
+cosign verify-attestation --type spdxjson <same arguments>   # the SBOM
+```
 
 ## Quality gates (Phase 18)
 
@@ -272,7 +309,7 @@ transitively across files), and the GitHub Actions used in `ci.yml` itself.
 them anywhere. Since Phase 20 there **is** a Helm chart (`deploy/helm/`), but there is
 still no cluster to deploy it *to*; a "deploy" job would point at a target that does not
 exist, which is worse than not having the step. What CI does instead is keep the chart
-honest: the `helm-chart` job renders it on every push (see below), because an unapplied
+honest: the `k8s-manifests` job renders and validates it on every push (see above), because an unapplied
 chart's most likely failure is to rot quietly until the day someone needs it. `docker-compose.yml` remains the actual
 "run this platform" mechanism, for local development only (see
 [docs/local-development.md](local-development.md)) — publishing images to GHCR is

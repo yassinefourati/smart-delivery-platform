@@ -1,0 +1,72 @@
+# =============================================================================
+# On-call: the verbs the incident runbook needs, and no others
+# (docs/runbooks/incident-response.md).
+#
+#   pods: patch       -- the quarantine label (security.sdp/quarantine=true) and
+#                        removing a pod from its Service (app.kubernetes.io/name
+#                        relabel) -- isolate WITHOUT destroying evidence
+#   pods: delete      -- after evidence is captured
+#   deployments/scale,
+#   deployments: patch -- scale to zero, `kubectl rollout restart`, rollback
+#   rollouts          -- Argo Rollouts abort/promote/undo
+#   networkpolicies   -- emergency deny rules
+#   pods/log          -- evidence
+#
+# Still no secrets and no exec: capturing a compromised pod's state is done by the
+# forensics procedure (ephemeral debug container via break-glass), not by opening a
+# shell in it with everyday credentials.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: sdp-incident-responder
+rules:
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [get, list, watch, patch, delete]
+  - apiGroups: [""]
+    resources: [pods/log, events, services, endpoints, configmaps]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [apps]
+    resources: [deployments/scale]
+    verbs: [get, patch, update]
+  - apiGroups: [argoproj.io]
+    resources: [rollouts, analysisruns]
+    verbs: [get, list, watch, patch]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, patch, delete]
+  - apiGroups: [postgresql.cnpg.io]
+    resources: [clusters, backups]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sdp-incident-responder
+  namespace: sdp
+subjects:
+  - kind: Group
+    name: sdp:oncall
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: sdp-incident-responder
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sdp-incident-responder
+  namespace: sdp-data
+subjects:
+  - kind: Group
+    name: sdp:oncall
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: sdp-incident-responder
+  apiGroup: rbac.authorization.k8s.io

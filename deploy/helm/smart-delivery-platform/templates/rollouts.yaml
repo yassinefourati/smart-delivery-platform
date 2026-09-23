@@ -1,0 +1,94 @@
+{{/*
+================================================================================
+Canary releases with Argo Rollouts (Phase 22). Off by default; needs the Argo
+Rollouts controller and its CRDs.
+
+Each service listed in rollouts.services gets a Rollout that REFERENCES the
+chart's Deployment (workloadRef) instead of copying its pod spec, so the probes,
+security context and shutdown budget stay defined in exactly one place. The
+Deployment is rendered with replicas: 0 and the Rollout runs the pods.
+
+The canary shifts pods, not traffic weights: with no service mesh or ingress
+integration, "25%" means a quarter of the replicas run the new version and the
+Service spreads requests across all of them. After each step an AnalysisRun asks
+Prometheus for the new version's 5xx ratio; one failed measurement aborts the
+rollout and scales the stable ReplicaSet back up. That is the automatic rollback.
+
+Flyway migrations still run when the FIRST canary pod starts, before any analysis
+has passed -- so a canary protects against bad code, not a bad migration. Keep
+migrations backward-compatible (expand, then contract), which is what makes
+aborting safe at all (docs/security-hardening.md, "Rollback").
+================================================================================
+*/}}
+{{- if .Values.rollouts.enabled }}
+{{- $root := . }}
+{{- $ro := .Values.rollouts }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AnalysisTemplate
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "error-rate") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "error-rate") | nindent 4 }}
+spec:
+  args:
+    - name: job
+    - name: canary-hash
+  metrics:
+    - name: http-5xx-ratio
+      interval: {{ $ro.analysis.interval }}
+      count: {{ $ro.analysis.count }}
+      failureLimit: {{ $ro.analysis.failureLimit }}
+      # No traffic yet is not a failure: NaN (0/0) is treated as success so a
+      # quiet canary is not rolled back for being quiet.
+      successCondition: "isNaN(result[0]) || result[0] < {{ $ro.analysis.maxErrorRatio }}"
+      provider:
+        prometheus:
+          address: {{ $ro.analysis.prometheusAddress }}
+          # The CANARY's pods only (Rollout pods are named <rollout>-<hash>-<id>):
+          # measured across the whole service, a broken canary is diluted by the
+          # healthy stable pods and passes.
+          query: |
+            sum(rate(http_server_requests_seconds_count{job="{{ "{{" }}args.job{{ "}}" }}",pod=~"{{ "{{" }}args.job{{ "}}" }}-{{ "{{" }}args.canary-hash{{ "}}" }}-.*",status=~"5..",uri!~"/actuator.*"}[2m]))
+            /
+            sum(rate(http_server_requests_seconds_count{job="{{ "{{" }}args.job{{ "}}" }}",pod=~"{{ "{{" }}args.job{{ "}}" }}-{{ "{{" }}args.canary-hash{{ "}}" }}-.*",uri!~"/actuator.*"}[2m]))
+{{- range $name := $ro.services }}
+{{- $svc := index $root.Values.services $name }}
+{{- $fullName := include "sdp.name" (dict "root" $root "name" $name) }}
+---
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+spec:
+  replicas: {{ int (default 1 $svc.replicaCount) }}
+  revisionHistoryLimit: 5
+  selector:
+    matchLabels:
+      {{- include "sdp.selectorLabels" (dict "root" $root "name" $name) | nindent 6 }}
+  workloadRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullName }}
+  strategy:
+    canary:
+      steps:
+        {{- range $w := $ro.canaryWeights }}
+        - setWeight: {{ $w }}
+        - pause: { duration: {{ $ro.pauseBetweenSteps }} }
+        - analysis:
+            templates:
+              - templateName: {{ include "sdp.configName" (dict "root" $root "name" "error-rate") }}
+            args:
+              - name: job
+                value: {{ $fullName }}
+              - name: canary-hash
+                valueFrom:
+                  podTemplateHashValue: Latest
+        {{- end }}
+{{- end }}
+{{- end }}

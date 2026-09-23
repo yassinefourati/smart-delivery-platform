@@ -1,0 +1,50 @@
+{{/*
+The server certificate for each cluster, from one private CA (tls.issuerRef; the
+ClusterIssuer is in deploy/cluster/cert-manager/). The SANs cover every Service CNPG
+creates, in short, namespaced and fully-qualified form, because the client uses
+sslmode=verify-full: the host in the DB_URL must be in this list or the connection is
+refused -- which is exactly the property that stops a spoofed endpoint from receiving
+a password.
+
+ECDSA P-256 and rotationPolicy Always: a renewal gets a NEW private key, so a key that
+leaked stops being useful at the next renewal rather than never. The cnpg.io/reload
+label makes CNPG reload the certificate live when cert-manager renews it.
+*/}}
+{{- $root := . }}
+{{- range $name, $cfg := .Values.clusters }}
+{{- if $cfg.enabled }}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "sdpdata.tlsSecret" (dict "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root "name" $name) | nindent 4 }}
+spec:
+  secretName: {{ include "sdpdata.tlsSecret" (dict "name" $name) }}
+  secretTemplate:
+    labels:
+      cnpg.io/reload: "true"
+  commonName: {{ printf "%s-rw.%s.svc" $name $root.Release.Namespace }}
+  dnsNames:
+    {{- range $svc := list "rw" "ro" "r" }}
+    - {{ printf "%s-%s" $name $svc }}
+    - {{ printf "%s-%s.%s" $name $svc $root.Release.Namespace }}
+    - {{ printf "%s-%s.%s.svc" $name $svc $root.Release.Namespace }}
+    - {{ printf "%s-%s.%s.svc.cluster.local" $name $svc $root.Release.Namespace }}
+    {{- end }}
+  usages:
+    - server auth
+    - digital signature
+    - key encipherment
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+    rotationPolicy: Always
+  duration: {{ $root.Values.tls.duration }}
+  renewBefore: {{ $root.Values.tls.renewBefore }}
+  issuerRef:
+    {{- toYaml $root.Values.tls.issuerRef | nindent 4 }}
+{{- end }}
+{{- end }}

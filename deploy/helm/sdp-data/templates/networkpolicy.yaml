@@ -1,0 +1,127 @@
+{{/*
+================================================================================
+Network isolation for the database tier.
+
+default-deny (namespace-wide, both directions), then one policy per cluster that
+allows exactly what a CNPG cluster needs:
+
+  ingress 5432   from its ONE client service's pods in the application namespace
+                 (ADR 001's boundary, now at L4: payment-service cannot even open a
+                 socket to order-db), and from the cluster's own instances
+                 (streaming replication)
+  ingress 8000   the instance manager's status port: from the operator and from the
+                 cluster's own instances
+  ingress 9187   metrics, from the monitoring namespace
+  egress         DNS; the cluster's own instances (5432/8000); 443 for S3, STS and
+                 the Kubernetes API server -- with the cloud metadata endpoints
+                 carved out, so a compromised database pod cannot fetch node
+                 credentials (IRSA goes through STS, not IMDS)
+
+Policies are additive, so the default-deny is what makes "exactly" true.
+================================================================================
+*/}}
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . }}
+{{- $np := .Values.networkPolicy }}
+{{- if $np.defaultDenyNamespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sdp-data-default-deny
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root) | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+{{- end }}
+{{- range $name, $cfg := .Values.clusters }}
+{{- if $cfg.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root "name" $name) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      cnpg.io/cluster: {{ $name }}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    # The one application service that owns this database.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $root.Values.application.namespace }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ $cfg.client }}
+              {{- with $root.Values.application.releaseName }}
+              app.kubernetes.io/instance: {{ . }}
+              {{- end }}
+            # A quarantined pod (docs/runbooks/incident-response.md) loses its
+            # database too, not just its application peers.
+            matchExpressions:
+              - key: security.sdp/quarantine
+                operator: DoesNotExist
+      ports:
+        - {port: 5432, protocol: TCP}
+    # Replication and status between the cluster's own instances.
+    - from:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ $name }}
+      ports:
+        - {port: 5432, protocol: TCP}
+        - {port: 8000, protocol: TCP}
+    # The operator (status, promote, fencing).
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.operatorNamespace }}
+      ports:
+        - {port: 8000, protocol: TCP}
+        - {port: 5432, protocol: TCP}
+    # Prometheus.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.monitoringNamespace }}
+      ports:
+        - {port: 9187, protocol: TCP}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $np.kubeDns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $np.kubeDns.podLabels | nindent 14 }}
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:
+        - podSelector:
+            matchLabels:
+              cnpg.io/cluster: {{ $name }}
+      ports:
+        - {port: 5432, protocol: TCP}
+        - {port: 8000, protocol: TCP}
+    - to:
+        {{- range $cidr := $np.httpsEgressCidrs }}
+        - ipBlock:
+            cidr: {{ $cidr }}
+            {{- if $np.blockedCidrs }}
+            except:
+              {{- toYaml $np.blockedCidrs | nindent 14 }}
+            {{- end }}
+        {{- end }}
+      ports:
+        - {port: 443, protocol: TCP}
+{{- end }}
+{{- end }}
+{{- end }}

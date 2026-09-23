@@ -1,0 +1,40 @@
+apiVersion: v2
+name: sdp-data
+description: >-
+  The Smart Delivery Platform's PostgreSQL tier on CloudNativePG: one HA cluster per
+  schema-owning service (ADR 001's database-per-service boundary, now enforced by the
+  network and by Postgres roles as well as by the code), with verified TLS, SCRAM,
+  a migrator/runtime role split, pgAudit, continuous WAL archiving and scheduled base
+  backups to object storage (point-in-time recovery), and an optional cross-region
+  replica cluster for disaster recovery. See ADR 014.
+type: application
+version: 0.1.0
+
+# The PostgreSQL major the services' Flyway migrations and Testcontainers tests run
+# against (postgres:17-alpine). Not an image tag -- values.yaml pins that by digest.
+appVersion: "17"
+
+# CloudNativePG itself needs 1.27+ for the versions this chart was written against;
+# nothing here needs more.
+kubeVersion: ">= 1.27.0-0"
+
+keywords:
+  - postgresql
+  - cloudnative-pg
+  - backup
+  - disaster-recovery
+home: https://github.com/yassinefourati/smart-delivery-platform
+sources:
+  - https://github.com/yassinefourati/smart-delivery-platform
+
+maintainers:
+  - name: Smart Delivery Platform
+    url: https://github.com/yassinefourati/smart-delivery-platform
+
+annotations:
+  # Rendered and schema-validated against the CRDs (CloudNativePG, the Barman Cloud
+  # plugin, cert-manager, ESO, Prometheus Operator), never installed. See README.md.
+  sdp.dev/verified-against-cluster: "false"
+  sdp.dev/requires: >-
+    cloudnative-pg >= 1.26, plugin-barman-cloud >= 0.5, cert-manager,
+    external-secrets >= 0.16 (external-secrets.io/v1), prometheus-operator (optional)

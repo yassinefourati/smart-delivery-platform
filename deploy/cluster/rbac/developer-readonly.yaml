@@ -1,0 +1,39 @@
+# =============================================================================
+# Developers: read-only, and deliberately blind to Secrets and to pod exec.
+#
+# Mapped from an identity-provider group via EKS access entries (or aws-auth):
+# nobody gets a personal ClusterRoleBinding. `view` is Kubernetes' built-in read-only
+# role and already excludes Secrets; this adds nothing that writes. What it does NOT
+# include is as important:
+#   - secrets (get/list) -- a list of Secrets is a list of every credential;
+#   - pods/exec, pods/attach, pods/portforward -- a shell in a production pod is
+#     both a data-exfiltration path and an unaudited change. Debugging uses logs,
+#     traces and metrics; the exceptions go through break-glass.
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sdp-developers-view
+  namespace: sdp
+subjects:
+  - kind: Group
+    name: sdp:developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: sdp-developers-view
+  namespace: sdp-data
+subjects:
+  - kind: Group
+    name: sdp:developers
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: view
+  apiGroup: rbac.authorization.k8s.io

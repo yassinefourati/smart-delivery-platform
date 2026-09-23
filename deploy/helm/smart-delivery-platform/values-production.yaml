@@ -34,6 +34,10 @@ common:
   otlpTracingEndpoint: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
 
 database:
+  # verify-full against the CloudNativePG CA, which trust-manager copies into this
+  # namespace as ConfigMap sdp-postgres-ca (deploy/cluster/trust-manager/).
+  tls:
+    enabled: true
   # Lowered from 5 because the HPAs below raise the CEILING this has to be sized
   # against, and the ceiling is what matters -- the connections are taken when the
   # autoscaler scales, not when somebody reviews the values file.
@@ -79,21 +83,44 @@ services:
       # stamped into every token's header, and a kid must name ONE piece of key
       # material forever.
       JWT_SIGNING_KID: "sdp-REPLACE_ME_YYYY_MM_a"
-      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_USER_HOST:5432/user_db?sslmode=require"
+      DB_URL: "jdbc:postgresql://user-db-rw.sdp-data.svc:5432/user_db?sslmode=verify-full&sslrootcert=/etc/sdp/pg-ca/ca.crt"
+    # Restated in full: Helm replaces lists instead of merging them. The
+    # migrator pair is the schema owner Flyway uses (Phase 22, docs/security-hardening.md).
+    secretEnv:
+      - {name: DB_USERNAME, secretName: sdp-user-db, key: DB_USERNAME}
+      - {name: DB_PASSWORD, secretName: sdp-user-db, key: DB_PASSWORD}
+      - {name: DB_MIGRATION_USERNAME, secretName: sdp-user-db-migrator, key: DB_MIGRATION_USERNAME}
+      - {name: DB_MIGRATION_PASSWORD, secretName: sdp-user-db-migrator, key: DB_MIGRATION_PASSWORD}
+      - {name: JWT_PRIVATE_KEY, secretName: sdp-jwt-signing, key: JWT_PRIVATE_KEY}
+      - {name: ORDER_SERVICE_CLIENT_SECRET, secretName: sdp-service-clients, key: ORDER_SERVICE_CLIENT_SECRET}
   product-service:
     replicaCount: 2
     autoscaling:
       enabled: true
     config:
-      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_PRODUCT_HOST:5432/product_db?sslmode=require"
+      DB_URL: "jdbc:postgresql://product-db-rw.sdp-data.svc:5432/product_db?sslmode=verify-full&sslrootcert=/etc/sdp/pg-ca/ca.crt"
       REDIS_HOST: "REPLACE_ME_REDIS_HOST"
       REDIS_PORT: "6379"
+    # Restated in full: Helm replaces lists instead of merging them. The
+    # migrator pair is the schema owner Flyway uses (Phase 22, docs/security-hardening.md).
+    secretEnv:
+      - {name: DB_USERNAME, secretName: sdp-product-db, key: DB_USERNAME}
+      - {name: DB_PASSWORD, secretName: sdp-product-db, key: DB_PASSWORD}
+      - {name: DB_MIGRATION_USERNAME, secretName: sdp-product-db-migrator, key: DB_MIGRATION_USERNAME}
+      - {name: DB_MIGRATION_PASSWORD, secretName: sdp-product-db-migrator, key: DB_MIGRATION_PASSWORD}
   inventory-service:
     # No HPA: throughput is bounded by SELECT ... FOR UPDATE on the same hot stock
     # rows, so replicas past about three buy lock waits rather than throughput.
     replicaCount: 2
     config:
-      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_INVENTORY_HOST:5432/inventory_db?sslmode=require"
+      DB_URL: "jdbc:postgresql://inventory-db-rw.sdp-data.svc:5432/inventory_db?sslmode=verify-full&sslrootcert=/etc/sdp/pg-ca/ca.crt"
+    # Restated in full: Helm replaces lists instead of merging them. The
+    # migrator pair is the schema owner Flyway uses (Phase 22, docs/security-hardening.md).
+    secretEnv:
+      - {name: DB_USERNAME, secretName: sdp-inventory-db, key: DB_USERNAME}
+      - {name: DB_PASSWORD, secretName: sdp-inventory-db, key: DB_PASSWORD}
+      - {name: DB_MIGRATION_USERNAME, secretName: sdp-inventory-db-migrator, key: DB_MIGRATION_USERNAME}
+      - {name: DB_MIGRATION_PASSWORD, secretName: sdp-inventory-db-migrator, key: DB_MIGRATION_PASSWORD}
   order-service:
     # No HPA: its consumers are capped at one partition (no NewTopic bean exists,
     # no listener sets concurrency), and a CPU autoscaler would flap against the
@@ -102,15 +129,37 @@ services:
     # replicas do for every outbox service.
     replicaCount: 2
     config:
-      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_ORDER_HOST:5432/order_db?sslmode=require"
+      DB_URL: "jdbc:postgresql://order-db-rw.sdp-data.svc:5432/order_db?sslmode=verify-full&sslrootcert=/etc/sdp/pg-ca/ca.crt"
+    # Restated in full: Helm replaces lists instead of merging them. The
+    # migrator pair is the schema owner Flyway uses (Phase 22, docs/security-hardening.md).
+    secretEnv:
+      - {name: DB_USERNAME, secretName: sdp-order-db, key: DB_USERNAME}
+      - {name: DB_PASSWORD, secretName: sdp-order-db, key: DB_PASSWORD}
+      - {name: DB_MIGRATION_USERNAME, secretName: sdp-order-db-migrator, key: DB_MIGRATION_USERNAME}
+      - {name: DB_MIGRATION_PASSWORD, secretName: sdp-order-db-migrator, key: DB_MIGRATION_PASSWORD}
+      - {name: ORDER_SERVICE_CLIENT_SECRET, secretName: sdp-service-clients, key: ORDER_SERVICE_CLIENT_SECRET}
   payment-service:
     replicaCount: 2
     config:
-      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_PAYMENT_HOST:5432/payment_db?sslmode=require"
+      DB_URL: "jdbc:postgresql://payment-db-rw.sdp-data.svc:5432/payment_db?sslmode=verify-full&sslrootcert=/etc/sdp/pg-ca/ca.crt"
+    # Restated in full: Helm replaces lists instead of merging them. The
+    # migrator pair is the schema owner Flyway uses (Phase 22, docs/security-hardening.md).
+    secretEnv:
+      - {name: DB_USERNAME, secretName: sdp-payment-db, key: DB_USERNAME}
+      - {name: DB_PASSWORD, secretName: sdp-payment-db, key: DB_PASSWORD}
+      - {name: DB_MIGRATION_USERNAME, secretName: sdp-payment-db-migrator, key: DB_MIGRATION_USERNAME}
+      - {name: DB_MIGRATION_PASSWORD, secretName: sdp-payment-db-migrator, key: DB_MIGRATION_PASSWORD}
   delivery-service:
     replicaCount: 2
     config:
-      DB_URL: "jdbc:postgresql://REPLACE_ME_PG_DELIVERY_HOST:5432/delivery_db?sslmode=require"
+      DB_URL: "jdbc:postgresql://delivery-db-rw.sdp-data.svc:5432/delivery_db?sslmode=verify-full&sslrootcert=/etc/sdp/pg-ca/ca.crt"
+    # Restated in full: Helm replaces lists instead of merging them. The
+    # migrator pair is the schema owner Flyway uses (Phase 22, docs/security-hardening.md).
+    secretEnv:
+      - {name: DB_USERNAME, secretName: sdp-delivery-db, key: DB_USERNAME}
+      - {name: DB_PASSWORD, secretName: sdp-delivery-db, key: DB_PASSWORD}
+      - {name: DB_MIGRATION_USERNAME, secretName: sdp-delivery-db-migrator, key: DB_MIGRATION_USERNAME}
+      - {name: DB_MIGRATION_PASSWORD, secretName: sdp-delivery-db-migrator, key: DB_MIGRATION_PASSWORD}
   notification-service:
     # Two replicas is honestly a little dishonest here: with one partition per
     # topic the second replica's consumers are assigned nothing and simply idle. It
@@ -126,6 +175,63 @@ services:
 # deliberately.
 outbox:
   scalePollInterval: true
+
+externalSecrets:
+  # Every credential comes from AWS Secrets Manager through the ClusterSecretStore in
+  # deploy/cluster/external-secrets/. The same secret-manager keys feed the CNPG role
+  # Secrets in sdp-data (deploy/helm/sdp-data), so a rotation happens in one place.
+  enabled: true
+  storeRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  secrets:
+    sdp-user-db:
+      DB_USERNAME: {key: prod/sdp/user-service/db-app, property: username}
+      DB_PASSWORD: {key: prod/sdp/user-service/db-app, property: password}
+    sdp-user-db-migrator:
+      DB_MIGRATION_USERNAME: {key: prod/sdp/user-service/db-migrator, property: username}
+      DB_MIGRATION_PASSWORD: {key: prod/sdp/user-service/db-migrator, property: password}
+    sdp-product-db:
+      DB_USERNAME: {key: prod/sdp/product-service/db-app, property: username}
+      DB_PASSWORD: {key: prod/sdp/product-service/db-app, property: password}
+    sdp-product-db-migrator:
+      DB_MIGRATION_USERNAME: {key: prod/sdp/product-service/db-migrator, property: username}
+      DB_MIGRATION_PASSWORD: {key: prod/sdp/product-service/db-migrator, property: password}
+    sdp-inventory-db:
+      DB_USERNAME: {key: prod/sdp/inventory-service/db-app, property: username}
+      DB_PASSWORD: {key: prod/sdp/inventory-service/db-app, property: password}
+    sdp-inventory-db-migrator:
+      DB_MIGRATION_USERNAME: {key: prod/sdp/inventory-service/db-migrator, property: username}
+      DB_MIGRATION_PASSWORD: {key: prod/sdp/inventory-service/db-migrator, property: password}
+    sdp-order-db:
+      DB_USERNAME: {key: prod/sdp/order-service/db-app, property: username}
+      DB_PASSWORD: {key: prod/sdp/order-service/db-app, property: password}
+    sdp-order-db-migrator:
+      DB_MIGRATION_USERNAME: {key: prod/sdp/order-service/db-migrator, property: username}
+      DB_MIGRATION_PASSWORD: {key: prod/sdp/order-service/db-migrator, property: password}
+    sdp-payment-db:
+      DB_USERNAME: {key: prod/sdp/payment-service/db-app, property: username}
+      DB_PASSWORD: {key: prod/sdp/payment-service/db-app, property: password}
+    sdp-payment-db-migrator:
+      DB_MIGRATION_USERNAME: {key: prod/sdp/payment-service/db-migrator, property: username}
+      DB_MIGRATION_PASSWORD: {key: prod/sdp/payment-service/db-migrator, property: password}
+    sdp-delivery-db:
+      DB_USERNAME: {key: prod/sdp/delivery-service/db-app, property: username}
+      DB_PASSWORD: {key: prod/sdp/delivery-service/db-app, property: password}
+    sdp-delivery-db-migrator:
+      DB_MIGRATION_USERNAME: {key: prod/sdp/delivery-service/db-migrator, property: username}
+      DB_MIGRATION_PASSWORD: {key: prod/sdp/delivery-service/db-migrator, property: password}
+    sdp-jwt-signing:
+      JWT_PRIVATE_KEY: {key: prod/sdp/user-service/jwt-signing, property: private_key_pkcs8}
+    sdp-service-clients:
+      ORDER_SERVICE_CLIENT_SECRET: {key: prod/sdp/order-service/client, property: secret}
+
+# order-service ships as a canary: 25/50/75% of pods, a 5xx analysis after each step,
+# automatic rollback on failure (templates/rollouts.yaml). Needs Argo Rollouts.
+rollouts:
+  enabled: true
+  services:
+    - order-service
 
 secrets:
   create: false
@@ -166,6 +272,36 @@ networkPolicy:
   enabled: true
   monitoringNamespace: REPLACE_ME_MONITORING_NAMESPACE
   ingressControllerNamespace: REPLACE_ME_INGRESS_NAMESPACE
+  # Default deny in both directions, then one egress allow-list per service
+  # (templates/networkpolicy.yaml). Needs a CNI that ENFORCES NetworkPolicy --
+  # on EKS, enable it in the VPC CNI or run Cilium -- or all of this is inert.
+  restrictEgress: true
+  defaultDenyNamespace: true
+  egress:
+    postgres:
+      namespace: sdp-data
+      clusters:
+        user-service: user-db
+        product-service: product-db
+        inventory-service: inventory-db
+        order-service: order-db
+        payment-service: payment-db
+        delivery-service: delivery-db
+    kafka:
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: REPLACE_ME_KAFKA_NAMESPACE
+    redis:
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: REPLACE_ME_REDIS_NAMESPACE
+    otlp:
+      peers:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: observability
 
 ingress:
   enabled: true

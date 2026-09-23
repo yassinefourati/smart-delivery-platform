@@ -1,0 +1,124 @@
+# =============================================================================
+# Falco: runtime detection (Phase 22). Values for the falcosecurity/falco chart:
+#
+#   helm upgrade --install falco falcosecurity/falco -n security -f values.yaml
+#
+# Admission control (PSS, Kyverno) decides what may START; Falco watches what a
+# running container actually DOES, which is where an exploited service shows up: a
+# JVM that spawns a shell, a process nobody shipped, an outbound connection to a
+# mining pool, a read of the service-account token by something other than the app.
+#
+# The SDP rules below are written against what these images are: a JRE (or nginx)
+# on Alpine, running one process as UID 1000, with a read-only root filesystem. Any
+# second process is already suspicious, which is what makes the rules sharp.
+# CI syntax-checks them with `falco -V` against Falco's default ruleset (the
+# k8s-manifests job in .github/workflows/ci.yml). That proves they load, not that
+# they fire: run falcosecurity/event-generator in staging before trusting their
+# silence.
+# =============================================================================
+driver:
+  # CO-RE eBPF: no kernel module to build or load, works on EKS AL2023/Bottlerocket.
+  kind: modern_ebpf
+
+tty: false
+
+# Alerts leave the node immediately via falcosidekick, to Alertmanager (paging, with
+# the same `category: security` routing as the Prometheus alerts) and to Loki
+# (searchable history for the investigation).
+falcosidekick:
+  enabled: true
+  config:
+    alertmanager:
+      hostport: http://kube-prometheus-stack-alertmanager.observability.svc:9093
+      minimumpriority: warning
+      # Becomes the `category` label observability/alertmanager-config.yaml routes on.
+      extralabels: "category:security"
+    loki:
+      hostport: http://loki-gateway.observability.svc:80
+      minimumpriority: notice
+
+falco:
+  json_output: true
+  priority: notice
+  # Only the SDP rules plus Falco's maintained default ruleset.
+  rules_files:
+    - /etc/falco/falco_rules.yaml
+    - /etc/falco/rules.d
+
+customRules:
+  sdp-rules.yaml: |-
+    # Scope: the platform's own namespaces.
+    - macro: sdp_container
+      condition: (container and k8s.ns.name in (sdp, sdp-data))
+
+    - list: sdp_jvm_binaries
+      items: [java]
+
+    - list: sdp_shell_and_net_tools
+      items: [sh, ash, bash, busybox, curl, wget, nc, ncat, socat, python, python3, perl]
+
+    # The single most useful signal for a Java service: the JVM executing a shell or a
+    # network tool. Log4Shell-class RCE, deserialization gadgets and SSTI all end here.
+    # The services never do this legitimately.
+    - rule: SDP JVM spawned a shell or network tool
+      desc: A Java process in an SDP container started a shell or a download/network tool.
+      condition: >
+        spawned_process and sdp_container
+        and proc.pname in (sdp_jvm_binaries)
+        and proc.name in (sdp_shell_and_net_tools)
+      output: >
+        JVM spawned %proc.name (cmdline=%proc.cmdline parent=%proc.pname
+        pod=%k8s.pod.name ns=%k8s.ns.name image=%container.image.repository)
+      priority: CRITICAL
+      tags: [sdp, rce, mitre_execution]
+
+    # Anything interactive in a production container. `kubectl exec` is not granted
+    # to anyone but break-glass (deploy/cluster/rbac/), so this is either break-glass
+    # (expected, and on record) or somebody who should not be there.
+    - rule: SDP interactive shell in container
+      desc: A shell with a terminal was started in an SDP container.
+      condition: spawned_process and sdp_container and proc.name in (sh, ash, bash) and proc.tty != 0
+      output: >
+        Interactive shell (user=%user.name cmdline=%proc.cmdline pod=%k8s.pod.name
+        ns=%k8s.ns.name image=%container.image.repository)
+      priority: WARNING
+      tags: [sdp, mitre_execution]
+
+    # The service-account token read by anything other than the app itself. The app
+    # pods do not call the Kubernetes API, so a token read is reconnaissance.
+    - rule: SDP service account token read by unexpected process
+      desc: A non-JVM process read the mounted Kubernetes service-account token.
+      condition: >
+        open_read and sdp_container
+        and fd.name startswith /var/run/secrets/kubernetes.io/serviceaccount
+        and not proc.name in (sdp_jvm_binaries, postgres, manager, barman-cloud-wal-archive, barman-cloud-backup)
+      output: >
+        SA token read (proc=%proc.name cmdline=%proc.cmdline file=%fd.name
+        pod=%k8s.pod.name ns=%k8s.ns.name)
+      priority: ERROR
+      tags: [sdp, credential_access, mitre_credential_access]
+
+    # Mining pools speak Stratum on a few well-known ports. Pairs with the
+    # SdpBusyWithoutTraffic Prometheus alert (CPU without requests).
+    - list: sdp_mining_ports
+      items: [3333, 4444, 5555, 7777, 14444, 45700]
+
+    - rule: SDP outbound connection to a mining port
+      desc: An SDP container connected out to a port used by cryptocurrency mining pools.
+      condition: >
+        outbound and sdp_container and fd.sport in (sdp_mining_ports)
+      output: >
+        Possible mining connection (dest=%fd.name proc=%proc.name pod=%k8s.pod.name
+        ns=%k8s.ns.name)
+      priority: CRITICAL
+      tags: [sdp, impact, mitre_impact]
+
+    # Package managers do not run in a running production container. Somebody is
+    # installing tooling.
+    - rule: SDP package manager executed
+      desc: apk/apt/pip/npm ran inside an SDP container at runtime.
+      condition: spawned_process and sdp_container and proc.name in (apk, apt, apt-get, dpkg, pip, pip3, npm)
+      output: >
+        Package manager in container (cmdline=%proc.cmdline pod=%k8s.pod.name ns=%k8s.ns.name)
+      priority: ERROR
+      tags: [sdp, persistence, mitre_persistence]

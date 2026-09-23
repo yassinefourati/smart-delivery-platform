@@ -1,0 +1,365 @@
+# =============================================================================
+# sdp-data -- the PostgreSQL tier (Phase 22, ADR 014)
+#
+# One CloudNativePG Cluster per schema-owning service, installed into its own
+# namespace (sdp-data) so the database tier has its own RBAC, its own network
+# policy and its own Pod Security level, separate from the application.
+#
+# Why CloudNativePG rather than a managed database (RDS/Aurora): see ADR 014. In
+# short, the same failover, backup and recovery model everywhere the platform
+# runs, declared next to the application and reviewed in the same PRs, at the
+# cost of operating it ourselves. If RDS is the choice instead, skip this chart;
+# the application chart only needs a DB_URL, a CA and two credentials.
+#
+# Every REPLACE_ME below must be real before install; NOTES.txt lists any left.
+# =============================================================================
+
+# primary -- the normal case: bootstraps empty clusters (initdb), owns the roles,
+#            archives WAL and takes base backups.
+# replica -- the DR region: every cluster is a continuous-recovery replica of the
+#            primary region's, fed from the primary's (cross-region-replicated) WAL
+#            archive. Promote with dr.promoted=true (NOT mode=primary, which would
+#            re-render a bootstrap section CNPG cannot change on an existing cluster);
+#            docs/runbooks/disaster-recovery.md#region-failover.
+mode: primary
+
+# -----------------------------------------------------------------------------
+# The clusters. The name is the Kubernetes object and the prefix of its Services
+# (<name>-rw, -ro, -r), which is what the application chart's DB_URLs point at
+# (values-production.yaml: jdbc:postgresql://order-db-rw.sdp-data.svc:5432/order_db).
+#
+#   database     created by initdb, owned by ownerRole.
+#   ownerRole    owns the database and every object Flyway creates. The services
+#                run Flyway as this role (DB_MIGRATION_USERNAME) and nothing else.
+#   appRole      the runtime connection pool (DB_USERNAME): SELECT/INSERT/UPDATE/
+#                DELETE on the owner's tables, USAGE on its sequences, no DDL, no
+#                TRUNCATE, no ownership. A SQL injection in a service can read and
+#                write that service's rows; it cannot drop the schema, and it cannot
+#                touch another service's database, which lives in another cluster.
+#   client       the app.kubernetes.io/name of the ONLY pods allowed to connect.
+#   secretPrefix where the two passwords live in the secret manager; the same keys
+#                feed the application's Secrets, so a rotation happens in one place.
+#
+# The role names are schema facts, not secrets. The username stored in the secret
+# manager MUST equal them -- the application reads its username from there.
+# -----------------------------------------------------------------------------
+clusters:
+  user-db:
+    enabled: true
+    database: user_db
+    ownerRole: user_owner
+    appRole: user_app
+    client: user-service
+    secretPrefix: prod/sdp/user-service
+  product-db:
+    enabled: true
+    database: product_db
+    ownerRole: product_owner
+    appRole: product_app
+    client: product-service
+    secretPrefix: prod/sdp/product-service
+  inventory-db:
+    enabled: true
+    database: inventory_db
+    ownerRole: inventory_owner
+    appRole: inventory_app
+    client: inventory-service
+    secretPrefix: prod/sdp/inventory-service
+  order-db:
+    enabled: true
+    database: order_db
+    ownerRole: order_owner
+    appRole: order_app
+    client: order-service
+    secretPrefix: prod/sdp/order-service
+    # The busiest writer (orders, saga state, outbox). Per-cluster overrides of any
+    # key under `cluster:` below go here.
+    overrides:
+      storage:
+        size: 50Gi
+  payment-db:
+    enabled: true
+    database: payment_db
+    ownerRole: payment_owner
+    appRole: payment_app
+    client: payment-service
+    secretPrefix: prod/sdp/payment-service
+  delivery-db:
+    enabled: true
+    database: delivery_db
+    ownerRole: delivery_owner
+    appRole: delivery_app
+    client: delivery-service
+    secretPrefix: prod/sdp/delivery-service
+
+# Point-in-time recovery: add a NEW entry with `recoverFrom` (the runbook has the
+# full procedure, docs/runbooks/disaster-recovery.md#point-in-time-recovery):
+#
+#   order-db-pitr:
+#     enabled: true
+#     database: order_db            # same names as the source: they come from the backup
+#     ownerRole: order_owner
+#     appRole: order_app
+#     client: order-service
+#     secretPrefix: prod/sdp/order-service
+#     recoverFrom:
+#       cluster: order-db
+#       targetTime: "2026-09-23T14:05:00Z"   # omit to replay to the end of the archive
+
+# Where the application pods run; the NetworkPolicy admits only `client` pods from
+# this namespace (and this release's instance label, if set).
+application:
+  namespace: sdp
+  # app.kubernetes.io/instance of the application release; empty = any release.
+  releaseName: ""
+
+# -----------------------------------------------------------------------------
+# Shared cluster shape (overridable per cluster via clusters.<name>.overrides)
+# -----------------------------------------------------------------------------
+cluster:
+  # standard = minimal + pgAudit (and a few other extensions). minimal lacks
+  # pgAudit, which the audit settings below need. Pinned by digest: a tag can be
+  # re-pushed, and a database image changing under a running cluster is exactly the
+  # surprise this chart exists to rule out. CNPG rolls replicas first, then
+  # switches over, when this changes.
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.11-standard-trixie@sha256:09892aaed3919234cf5d6e86abea13870f82d39b84826e9f0926d859a8fba3dc
+
+  # One primary and two standbys, one per availability zone (anti-affinity below).
+  instances: 3
+
+  # Quorum synchronous replication: a commit returns only once ANY one standby has
+  # it. That is RPO 0 for the loss of a node or a whole zone, at the cost of one
+  # cross-AZ round trip per commit (single-digit ms on AWS).
+  #
+  # dataDurability "required" means that with BOTH standbys gone, writes block
+  # rather than silently degrading to asynchronous -- the database chooses
+  # consistency over availability. "preferred" would keep writing and accept the
+  # risk. With three instances in three zones, losing two at once is a regional
+  # event, which the DR replica (mode=replica) exists for.
+  synchronous:
+    method: any
+    number: 1
+    dataDurability: required
+
+  storage:
+    size: 20Gi
+    # MUST be an encrypted StorageClass (EBS: `encrypted: "true"`, ideally with a
+    # customer-managed KMS key). Encryption at rest is the volume's job.
+    storageClass: gp3-encrypted
+  # WAL on its own volume: a runaway WAL (a stuck archive, a stale replication slot)
+  # fills this one and stops writes, instead of filling the data volume and
+  # corrupting nothing but still stopping everything.
+  walStorage:
+    size: 10Gi
+    storageClass: gp3-encrypted
+
+  # requests == limits: Guaranteed QoS, so the kubelet never evicts a database
+  # under memory pressure before a stateless pod.
+  resources:
+    requests:
+      cpu: "1"
+      memory: 2Gi
+    limits:
+      cpu: "1"
+      memory: 2Gi
+
+  affinity:
+    enablePodAntiAffinity: true
+    # required, on zone: two instances never share an AZ, so one AZ outage loses at
+    # most one instance -- and the synchronous standby is always in another zone.
+    topologyKey: topology.kubernetes.io/zone
+    podAntiAffinityType: required
+
+  # Rolling updates: replicas first, then a switchover (not a restart) of the primary.
+  primaryUpdateStrategy: unsupervised
+  primaryUpdateMethod: switchover
+
+  priorityClassName: ""
+
+  postgresql:
+    parameters:
+      # --- transport and authentication -------------------------------------
+      ssl_min_protocol_version: TLSv1.3
+      password_encryption: scram-sha-256
+      # --- connection hygiene --------------------------------------------------
+      max_connections: "200"
+      # A transaction left open by a crashed or hung client holds locks and blocks
+      # vacuum; kill it after a minute.
+      idle_in_transaction_session_timeout: "60000"
+      # --- what the logs must show for an investigation --------------------------
+      log_connections: "on"
+      log_disconnections: "on"
+      log_lock_waits: "on"
+      log_min_duration_statement: "1000"
+      # --- pgAudit ----------------------------------------------------------------
+      # Global: every DDL and every role/privilege change, by anyone. Not reads or
+      # writes: the services' own DML would bury the signal, and it is already in
+      # their structured logs and traces. Humans get the full treatment instead: the
+      # superuser (the only thing `kubectl cnpg psql` connects as) is set to
+      # pgaudit.log=all in bootstrap (postInitSQL), so a break-glass session is
+      # recorded statement by statement.
+      pgaudit.log: "ddl,role"
+      pgaudit.log_catalog: "off"
+      pgaudit.log_relation: "on"
+      # Off: parameters are where the PII is (emails, addresses, payment references).
+      pgaudit.log_parameter: "off"
+      # --- WAL / archiving ------------------------------------------------------
+      # Upper bound on how long a committed transaction can sit in an unarchived WAL
+      # segment on a quiet database: the worst-case RPO for a regional loss.
+      archive_timeout: "5min"
+
+    # pg_hba: CNPG puts its own fixed rules first (local socket, replication via
+    # client certificates). These come next: refuse anything not on TLS, then
+    # SCRAM over TLS. CNPG's trailing default is never reached.
+    pg_hba:
+      - hostnossl all all 0.0.0.0/0 reject
+      - hostnossl all all ::/0 reject
+      - hostssl all all 0.0.0.0/0 scram-sha-256
+      - hostssl all all ::/0 scram-sha-256
+
+  # No superuser password exists at all: the operator reaches Postgres over the
+  # local socket, and break-glass is `kubectl cnpg psql`, which is RBAC-gated and
+  # (via pgAudit above) fully logged. A superuser password in a Secret is a
+  # credential that can be exfiltrated and replayed from anywhere the network allows.
+  enableSuperuserAccess: false
+
+  # Cap per-role connections so one leaking pool cannot starve the others (and the
+  # migrator can always get in). Keep appConnectionLimit >= the app chart's
+  # database.poolMax x the service's maximum replicas.
+  appConnectionLimit: 120
+  ownerConnectionLimit: 10
+
+# -----------------------------------------------------------------------------
+# TLS. The server certificate is issued by cert-manager from ONE private CA for
+# all six clusters, so the application needs one CA bundle (trust-manager ships it
+# as the ConfigMap sdp-postgres-ca to the application namespace), and
+# sslmode=verify-full checks the host name against the SANs below.
+# CNPG's default -- a self-signed CA per cluster -- would work, but would need six
+# CAs distributed to six services, and would rotate on the operator's schedule.
+# -----------------------------------------------------------------------------
+tls:
+  issuerRef:
+    name: sdp-postgres-ca
+    kind: ClusterIssuer
+    group: cert-manager.io
+  duration: 2160h     # 90 days
+  renewBefore: 360h   # 15 days
+  # CNPG reloads the server certificate on a Secret change (the label below), so a
+  # renewal needs no restart.
+
+# -----------------------------------------------------------------------------
+# Credentials: External Secrets Operator -> basic-auth Secrets CNPG consumes.
+# -----------------------------------------------------------------------------
+externalSecrets:
+  apiVersion: external-secrets.io/v1
+  refreshInterval: 1h
+  storeRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  # Secret-manager key suffixes under each cluster's secretPrefix.
+  ownerKey: db-migrator
+  appKey: db-app
+
+# -----------------------------------------------------------------------------
+# Backups: continuous WAL archiving + scheduled base backups, via the Barman Cloud
+# plugin (CNPG's in-tree barmanObjectStore is deprecated in its favour).
+# Together they give point-in-time recovery to any second inside the retention.
+# -----------------------------------------------------------------------------
+backup:
+  enabled: true
+  # One bucket, one prefix per cluster (barman's serverName = cluster name).
+  # The bucket is created by deploy/cluster/backup-bucket/create-backup-bucket.sh:
+  # versioned, S3 Object Lock in COMPLIANCE mode (nobody -- including an attacker
+  # holding our admin credentials -- can delete or overwrite a backup before its
+  # retention ends), SSE-KMS, public access blocked, replicated to the DR region.
+  destinationPath: s3://REPLACE_ME-sdp-pg-backups/
+  # No region setting: with IRSA the EKS pod-identity webhook injects AWS_REGION
+  # into the pod, and barman (boto3) reads it.
+  #
+  # IRSA: the instance pods' service account assumes this role. It needs
+  # s3:PutObject/GetObject/ListBucket on the bucket and kms:Encrypt/Decrypt/
+  # GenerateDataKey on its key -- and NOT s3:DeleteObject, so a compromised
+  # database pod cannot destroy its own backups.
+  irsaRoleArn: arn:aws:iam::REPLACE_ME_ACCOUNT:role/sdp-pg-backup
+  # Server-side encryption barman requests on every object (the bucket default
+  # also enforces it).
+  encryption: aws:kms
+  compression: gzip
+  # Empty on purpose. Barman enforces retention by DELETING objects, which the
+  # backup role above is not allowed to do. Retention is the bucket's job instead:
+  # Object Lock (compliance, 30 days) makes every backup and WAL segment
+  # undeletable for the recovery window, and a lifecycle rule expires them after
+  # it. A base backup and the WAL it needs age out together, so what remains is
+  # always a consistent recovery window. Set e.g. "30d" only with a role that may
+  # delete and a bucket without Object Lock.
+  retentionPolicy: ""
+  # CNPG's cron has a SECONDS field first. 03:00 UTC daily; staggered per cluster
+  # by `staggerMinutes` so six clusters do not all read from disk at once.
+  schedule: "0 0 3 * * *"
+  staggerMinutes: 10
+  # Also take one immediately after the cluster is created, so PITR works from day
+  # one rather than from the first 03:00.
+  immediate: true
+
+# -----------------------------------------------------------------------------
+# Disaster recovery. Install this chart in the DR region with values-dr.yaml
+# (mode=replica): each cluster there replays the primary region's WAL archive and
+# can be promoted in minutes. Its own backups go to a DR-region bucket.
+# -----------------------------------------------------------------------------
+dr:
+  # The PRIMARY region's archive as replicated into the DR region (S3 CRR), read
+  # by the replica clusters. Only used when mode=replica.
+  sourceDestinationPath: s3://REPLACE_ME-sdp-pg-backups-dr-replica/
+  # Set true to PROMOTE the DR clusters (mode=replica) to writable primaries:
+  # docs/runbooks/disaster-recovery.md. Not mode=primary -- that would re-render the
+  # bootstrap section, which cannot change on an existing cluster.
+  promoted: false
+
+# -----------------------------------------------------------------------------
+# Network: default-deny for the namespace, then per cluster: 5432 from its one
+# client service only; instance <-> instance; the operator; metrics scraping;
+# egress to DNS, the API server and S3/STS on 443 (never the metadata endpoint --
+# IRSA uses STS, not IMDS).
+# -----------------------------------------------------------------------------
+networkPolicy:
+  enabled: true
+  defaultDenyNamespace: true
+  operatorNamespace: cnpg-system
+  monitoringNamespace: observability
+  kubeDns:
+    namespace: kube-system
+    podLabels:
+      k8s-app: kube-dns
+  # 443 egress for S3, STS and the Kubernetes API server. Narrow with the VPC
+  # endpoint / API server CIDRs if they are known; the metadata endpoint is always
+  # excluded.
+  httpsEgressCidrs:
+    - 0.0.0.0/0
+  blockedCidrs:
+    - 169.254.169.254/32
+    - 169.254.170.2/32
+
+# -----------------------------------------------------------------------------
+# Monitoring (Prometheus Operator)
+# -----------------------------------------------------------------------------
+monitoring:
+  podMonitor:
+    enabled: true
+    extraLabels:
+      release: kube-prometheus-stack
+  prometheusRule:
+    enabled: true
+    extraLabels:
+      release: kube-prometheus-stack
+    # Backup freshness: a daily schedule plus slack.
+    backupMaxAgeHours: 26
+    replicationLagSeconds: 30
+    archiveMaxAgeSeconds: 1800
+    connectionsRatio: 0.8
+    diskFreeRatio: 0.15
+    # The Barman Cloud plugin's metric for the newest completed backup. The name
+    # comes from the plugin's documentation and has NOT been observed on a live
+    # /metrics here -- confirm it (kubectl port-forward <pod> 9187; curl
+    # :9187/metrics | grep backup) before trusting the SdpPgBackupStale alert. A
+    # wrong name makes that alert fire as "absent", not stay silent.
+    backupTimestampMetric: barman_cloud_cloudnative_pg_io_last_available_backup_timestamp

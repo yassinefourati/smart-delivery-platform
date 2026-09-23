@@ -85,6 +85,10 @@ exist.
 
 (one database per service, named in that service's DB_URL.)
 
+deploy/helm/sdp-data does all of this on CloudNativePG (Phase 22): one HA cluster per
+service, the database, an owner role for Flyway (DB_MIGRATION_USERNAME) and a DML-only
+runtime role (DB_USERNAME), TLS, backups. Install it first.
+
 One role per service, GRANTed on its own database only -- a shared role would let
 a compromised product-service pod read order_db directly, undoing at the SQL layer
 the database-per-service boundary ADR 001 enforces in code. (Do NOT provision
@@ -94,7 +98,19 @@ spring.datasource at all and nothing has ever used it.)
 --------------------------------------------------------------------------------
  2. SECRETS
 --------------------------------------------------------------------------------
-{{- if .Values.secrets.create }}
+{{- if .Values.externalSecrets.enabled }}
+externalSecrets.enabled is TRUE: this release rendered {{ len .Values.externalSecrets.secrets }} ExternalSecret(s)
+that the External Secrets Operator resolves from ClusterSecretStore
+"{{ .Values.externalSecrets.storeRef.name }}" into ordinary Secrets of the same names. Pods
+sit in CreateContainerConfigError until the first sync lands, so check that first:
+
+  kubectl -n {{ .Release.Namespace }} get externalsecrets
+  # READY=False with SecretSyncedError -> the store's IAM role cannot read that key.
+
+The chart never sees a value. Rotation happens in the backing store; ESO picks it up
+within refreshInterval ({{ .Values.externalSecrets.refreshInterval }}), and a `kubectl rollout restart`
+makes the pods read it (env vars are fixed at container start).
+{{- else if .Values.secrets.create }}
 secrets.create is TRUE, so this release just created Secrets full of
 REPLACE_ME placeholders. They are there to show the shape and to let
 `helm template` prove the wiring; Postgres will reject them and JwtKeyProvider
@@ -266,6 +282,12 @@ public host; that is correct behaviour, not a bug.
   HPAs ................. {{ $hpas := list }}{{ range $n, $s := .Values.services }}{{ if and $s.enabled (dig "autoscaling" "enabled" false $s) }}{{ $hpas = append $hpas $n }}{{ end }}{{ end }}{{ if $hpas }}{{ join ", " $hpas }}{{ else }}none{{ end }}
   PodDisruptionBudgets . {{ if .Values.podDisruptionBudget.enabled }}on, except for any service at one replica (a PDB there hangs every node drain){{ else }}OFF{{ end }}
   topologySpread ....... {{ if .Values.topologySpread.enabled }}on ({{ .Values.topologySpread.whenUnsatisfiable }}){{ else }}OFF{{ end }}
+  Egress allow-lists ... {{ if and .Values.networkPolicy.enabled .Values.networkPolicy.restrictEgress }}on{{ if .Values.networkPolicy.defaultDenyNamespace }}, plus a namespace default-deny{{ end }}{{ else }}OFF  (a compromised pod can reach anything, including the cloud metadata endpoint){{ end }}
+  Quarantine label ..... {{ if .Values.networkPolicy.enabled }}on  (kubectl label pod <pod> {{ .Values.networkPolicy.quarantineLabel }}=true -- cuts all traffic; docs/runbooks/incident-response.md){{ else }}OFF  (needs networkPolicy.enabled){{ end }}
+  ExternalSecrets ...... {{ if .Values.externalSecrets.enabled }}on  (store {{ .Values.externalSecrets.storeRef.name }}){{ else }}OFF{{ end }}
+  Postgres TLS verify .. {{ if .Values.database.tls.enabled }}on  (CA from ConfigMap {{ .Values.database.tls.caConfigMap }}){{ else }}OFF  (the JDBC driver does not verify the server; a spoofed Postgres would get the password){{ end }}
+  Security alerts ...... {{ if and .Values.observability.prometheusRule.enabled .Values.observability.prometheusRule.securityRules }}on{{ else }}OFF{{ end }}
+  Canary rollouts ...... {{ if .Values.rollouts.enabled }}{{ join ", " .Values.rollouts.services }}  (Argo Rollouts; the Deployment is scaled to 0 and owned by the Rollout){{ else }}OFF{{ end }}
 
 values-production.yaml, next to values.yaml in the chart, turns these on with the
 reasoning for each. Read it as the second half of values.yaml rather than as an
@@ -284,6 +306,17 @@ example.
   Intermittent 401s, and
   inventory-service looks down .. more than one user-service replica without a
                                   shared signing key. Section 3.
+  Pods cannot reach Postgres,
+  Kafka or Redis after enabling
+  restrictEgress ............... a peer's namespace/labels in networkPolicy.egress do
+                                  not match what is running. The egress policies
+                                  are per service: kubectl get netpol <svc>-egress -o yaml.
+  PKIX / "server certificate
+  does not match" at startup ... database.tls is on and the CA ConfigMap is missing
+                                  or stale, or the DB_URL host is not in the server
+                                  certificate's SANs (use the CNPG -rw Service name).
+  A canary that aborts itself .. the AnalysisRun measured a 5xx ratio over the
+                                  threshold. kubectl argo rollouts get rollout <svc>.
   A rollout that never finishes .. a migration ran past a peer replica's Flyway
                                   lock wait, or the startupProbe budget. Read the
                                   logs of the pod that is NOT progressing.

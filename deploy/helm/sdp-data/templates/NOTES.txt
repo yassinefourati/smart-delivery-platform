@@ -1,0 +1,41 @@
+{{- $placeholders := list }}
+{{- if contains "REPLACE_ME" .Values.backup.destinationPath }}{{ $placeholders = append $placeholders "backup.destinationPath" }}{{ end }}
+{{- if contains "REPLACE_ME" .Values.backup.irsaRoleArn }}{{ $placeholders = append $placeholders "backup.irsaRoleArn" }}{{ end }}
+{{- if and (eq .Values.mode "replica") (contains "REPLACE_ME" .Values.dr.sourceDestinationPath) }}{{ $placeholders = append $placeholders "dr.sourceDestinationPath" }}{{ end }}
+================================================================================
+ {{ .Chart.Name }} {{ .Chart.Version }} -> release {{ .Release.Name }} in {{ .Release.Namespace }}  (mode={{ .Values.mode }}{{ if .Values.dr.promoted }}, PROMOTED{{ end }})
+================================================================================
+Rendered and validated against the CRD schemas; never installed on a real cluster.
+Read deploy/helm/sdp-data/README.md ("What has been verified") before trusting it.
+{{ if $placeholders }}
+STOP: placeholder values are still set -- {{ join ", " $placeholders }}.
+Backups will fail until they are real, and SdpPgWalArchivingFailing will say so.
+{{ end }}
+Prerequisites (deploy/cluster/ installs all of them):
+  - CloudNativePG operator + the Barman Cloud plugin (namespace cnpg-system)
+  - cert-manager with the ClusterIssuer "{{ .Values.tls.issuerRef.name }}"
+  - External Secrets Operator with the ClusterSecretStore "{{ .Values.externalSecrets.storeRef.name }}"
+  - the StorageClass "{{ .Values.cluster.storage.storageClass }}" (encrypted)
+  - trust-manager distributing the CA as ConfigMap sdp-postgres-ca to the
+    "{{ .Values.application.namespace }}" namespace (what the services' sslrootcert points at)
+
+Watch the clusters come up (three instances each, one per zone):
+
+  kubectl -n {{ .Release.Namespace }} get clusters.postgresql.cnpg.io
+  kubectl cnpg -n {{ .Release.Namespace }} status order-db
+
+{{- if or (eq .Values.mode "primary") .Values.dr.promoted }}
+
+A cluster stuck in "Setting up primary" is almost always its owner Secret: the
+ExternalSecret has not synced (kubectl -n {{ .Release.Namespace }} get externalsecrets).
+
+Verify recoverability, not just health -- a backup that has never been restored is
+a hope, not a backup. The quarterly restore drill is in
+docs/runbooks/disaster-recovery.md; the first one belongs right after this install.
+{{- else }}
+
+This is the DR region: the clusters are READ-ONLY replicas of the primary region's
+WAL archive. Replay lag is `kubectl cnpg -n {{ .Release.Namespace }} status <cluster>`.
+To promote: docs/runbooks/disaster-recovery.md (dr.promoted=true). Do not promote
+while the primary region is still writing.
+{{- end }}

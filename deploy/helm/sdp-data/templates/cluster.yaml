@@ -1,0 +1,190 @@
+{{/*
+================================================================================
+One CloudNativePG Cluster per enabled entry in .Values.clusters.
+
+mode=primary: bootstrap with initdb. The database is owned by ownerRole (the Flyway
+  migrator); postInitApplicationSQL then locks the database down and creates the
+  <database>_rw group that the runtime role joins, with DEFAULT PRIVILEGES so every
+  table the owner creates later is readable/writable by that group and nothing more.
+  This exact SQL was exercised against PostgreSQL with user-service's real Flyway
+  migrations and runtime traffic: tables owned by the owner, the runtime pool
+  connected as the app role, CREATE/DROP/TRUNCATE refused to it, reads and writes
+  working (Phase 22 in the README).
+
+mode=replica: bootstrap by recovery from the PRIMARY region's WAL archive, then stay
+  a replica cluster replaying it. Roles, grants and schema arrive through the WAL,
+  so nothing is created here. dr.promoted=true makes it writable and turns on role
+  management (and, in scheduledbackup.yaml, base backups) -- see the DR runbook.
+================================================================================
+*/}}
+{{- include "sdpdata.validate" . }}
+{{- $root := . }}
+{{- range $name, $cfg := .Values.clusters }}
+{{- if $cfg.enabled }}
+{{- $s := include "sdpdata.shape" (dict "root" $root "cfg" $cfg) | fromYaml }}
+{{- $rw := printf "%s_rw" $cfg.database }}
+{{- $writable := or (eq $root.Values.mode "primary") $root.Values.dr.promoted }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: {{ $name }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root "name" $name) | nindent 4 }}
+spec:
+  description: {{ printf "%s for %s (%s)" $cfg.database $cfg.client $root.Values.mode | quote }}
+  imageName: {{ $s.imageName }}
+  instances: {{ $s.instances }}
+  primaryUpdateStrategy: {{ $s.primaryUpdateStrategy }}
+  primaryUpdateMethod: {{ $s.primaryUpdateMethod }}
+  enableSuperuserAccess: false
+  {{- with $s.priorityClassName }}
+  priorityClassName: {{ . }}
+  {{- end }}
+
+  postgresql:
+    parameters:
+      {{- range $k, $v := $s.postgresql.parameters }}
+      {{ $k }}: {{ $v | toString | quote }}
+      {{- end }}
+    pg_hba:
+      {{- toYaml $s.postgresql.pg_hba | nindent 6 }}
+    synchronous:
+      {{- toYaml $s.synchronous | nindent 6 }}
+
+  storage:
+    size: {{ $s.storage.size }}
+    storageClass: {{ $s.storage.storageClass }}
+  walStorage:
+    size: {{ $s.walStorage.size }}
+    storageClass: {{ $s.walStorage.storageClass }}
+
+  resources:
+    {{- toYaml $s.resources | nindent 4 }}
+
+  affinity:
+    {{- toYaml $s.affinity | nindent 4 }}
+
+  # Server certificate from cert-manager (certificate.yaml); the same Secret carries
+  # ca.crt, which is what CNPG needs as the server CA. Client and replication
+  # certificates stay CNPG-managed: they never leave this namespace.
+  certificates:
+    serverTLSSecret: {{ include "sdpdata.tlsSecret" (dict "name" $name) }}
+    serverCASecret: {{ include "sdpdata.tlsSecret" (dict "name" $name) }}
+
+  # podmonitor.yaml renders a PodMonitor with a `cluster` relabeling the built-in one
+  # lacks, so the operator's own is off.
+  monitoring:
+    enablePodMonitor: false
+
+  {{- if $root.Values.backup.enabled }}
+  # IRSA for the Barman Cloud plugin sidecar, which runs in each instance pod.
+  serviceAccountTemplate:
+    metadata:
+      annotations:
+        eks.amazonaws.com/role-arn: {{ $root.Values.backup.irsaRoleArn | quote }}
+
+  # Continuous WAL archiving to object storage: every completed WAL segment (and at
+  # least every archive_timeout) leaves the cluster, which is what bounds the RPO of
+  # a regional loss and what point-in-time recovery replays.
+  plugins:
+    - name: barman-cloud.cloudnative-pg.io
+      isWALArchiver: true
+      parameters:
+        barmanObjectName: {{ include "sdpdata.objectStore" (dict "name" $name) }}
+  {{- end }}
+
+  {{- if and (eq $root.Values.mode "primary") $cfg.recoverFrom }}
+  # Point-in-time recovery INTO THIS NEW CLUSTER from another cluster's archive
+  # (docs/runbooks/disaster-recovery.md#point-in-time-recovery). The source keeps
+  # running untouched; the application is switched over only once this one has been
+  # checked. Roles, grants and data all come from the backup.
+  bootstrap:
+    recovery:
+      source: {{ printf "%s-archive" $cfg.recoverFrom.cluster }}
+      {{- with $cfg.recoverFrom.targetTime }}
+      recoveryTarget:
+        # RFC 3339 with a zone. Replay stops just BEFORE this instant.
+        targetTime: {{ . | quote }}
+        exclusive: true
+      {{- end }}
+  externalClusters:
+    - name: {{ printf "%s-archive" $cfg.recoverFrom.cluster }}
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: {{ include "sdpdata.objectStore" (dict "name" $cfg.recoverFrom.cluster) }}
+          serverName: {{ $cfg.recoverFrom.cluster }}
+  {{- else if eq $root.Values.mode "primary" }}
+  bootstrap:
+    initdb:
+      database: {{ $cfg.database }}
+      owner: {{ $cfg.ownerRole }}
+      secret:
+        name: {{ include "sdpdata.ownerSecret" (dict "name" $name) }}
+      encoding: UTF8
+      # Page checksums: silent storage corruption becomes a loud read error instead of
+      # wrong answers that get replicated and backed up.
+      dataChecksums: true
+      postInitSQL:
+        # Superuser sessions (break-glass via `kubectl cnpg psql`) are audited in full.
+        - ALTER ROLE postgres SET pgaudit.log = 'all'
+      postInitApplicationSQL:
+        - REVOKE ALL ON DATABASE {{ $cfg.database }} FROM PUBLIC
+        - REVOKE ALL ON SCHEMA public FROM PUBLIC
+        - CREATE ROLE {{ $rw }} NOLOGIN
+        - GRANT CONNECT ON DATABASE {{ $cfg.database }} TO {{ $rw }}
+        - GRANT USAGE ON SCHEMA public TO {{ $rw }}
+        - ALTER DEFAULT PRIVILEGES FOR ROLE {{ $cfg.ownerRole }} IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {{ $rw }}
+        - ALTER DEFAULT PRIVILEGES FOR ROLE {{ $cfg.ownerRole }} IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO {{ $rw }}
+        - ALTER DEFAULT PRIVILEGES FOR ROLE {{ $cfg.ownerRole }} IN SCHEMA public GRANT EXECUTE ON FUNCTIONS TO {{ $rw }}
+
+  {{- else }}
+  # DR: seeded from the primary region's base backup, then kept current by
+  # replaying its archived WAL. Read-only until promoted with dr.promoted=true.
+  bootstrap:
+    recovery:
+      source: {{ include "sdpdata.originStore" (dict "name" $name) }}
+  replica:
+    # dr.promoted flips this to false: the replica stops following the archive and
+    # becomes a writable primary. bootstrap above stays as it was -- it is read only
+    # at creation, and CNPG does not allow changing it afterwards.
+    enabled: {{ not $root.Values.dr.promoted }}
+    source: {{ include "sdpdata.originStore" (dict "name" $name) }}
+  externalClusters:
+    - name: {{ include "sdpdata.originStore" (dict "name" $name) }}
+      plugin:
+        name: barman-cloud.cloudnative-pg.io
+        parameters:
+          barmanObjectName: {{ include "sdpdata.originStore" (dict "name" $name) }}
+          # The PRIMARY cluster's name, i.e. its folder in the archive.
+          serverName: {{ $name }}
+  {{- end }}
+
+  {{- if $writable }}
+  # Declarative roles, reconciled continuously: a password rotated in the secret
+  # manager reaches Postgres through ESO -> Secret -> here, with no manual ALTER ROLE.
+  managed:
+    roles:
+      - name: {{ $cfg.ownerRole }}
+        ensure: present
+        login: true
+        inherit: true
+        connectionLimit: {{ $s.ownerConnectionLimit }}
+        comment: "schema owner; Flyway migrations only"
+        passwordSecret:
+          name: {{ include "sdpdata.ownerSecret" (dict "name" $name) }}
+      - name: {{ $cfg.appRole }}
+        ensure: present
+        login: true
+        inherit: true
+        connectionLimit: {{ $s.appConnectionLimit }}
+        comment: {{ printf "runtime pool for %s; DML only" $cfg.client | quote }}
+        inRoles:
+          - {{ $rw }}
+        passwordSecret:
+          name: {{ include "sdpdata.appSecret" (dict "name" $name) }}
+  {{- end }}
+{{- end }}
+{{- end }}

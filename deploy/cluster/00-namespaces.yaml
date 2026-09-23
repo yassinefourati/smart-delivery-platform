@@ -1,0 +1,68 @@
+# =============================================================================
+# Namespaces and their Pod Security level (Phase 22, docs/security-hardening.md).
+#
+# Pod Security Admission is built into the API server: `enforce` rejects a pod that
+# breaks the level, `audit` records it, `warn` tells the person applying it. All three
+# are set, and pinned to a version so a Kubernetes upgrade cannot silently change what
+# "restricted" means under us.
+#
+#   sdp            restricted  the application. The chart already runs non-root,
+#                              read-only root FS, all capabilities dropped,
+#                              RuntimeDefault seccomp -- this makes that a guarantee
+#                              the API server enforces, not a convention.
+#   sdp-data       restricted  CloudNativePG instances run non-root with no
+#                              capabilities; nothing here needs more.
+#   observability  baseline    node exporters and log agents need host access that
+#                              restricted forbids; baseline still blocks privileged.
+#   security       privileged  Falco needs kernel access (eBPF). Nothing else runs
+#                              here, and RBAC on this namespace is admin-only.
+# =============================================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdp
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.30
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.30
+    # trust-manager copies the Postgres CA ConfigMap into namespaces with this label
+    # (cert-manager/postgres-ca.yaml).
+    sdp.io/postgres-client: "true"
+    # Kyverno's signature and registry policies apply to namespaces with this label.
+    sdp.io/workload-policy: enforced
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sdp-data
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.30
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.30
+    sdp.io/workload-policy: enforced
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observability
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.30
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: security
+  labels:
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/enforce-version: v1.30
+    pod-security.kubernetes.io/warn: baseline
+    pod-security.kubernetes.io/warn-version: v1.30
