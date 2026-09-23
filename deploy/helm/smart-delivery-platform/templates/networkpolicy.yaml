@@ -19,12 +19,22 @@ actually has on the http port:
 and a second object opens api-gateway (and the SPA) to the ingress controller's
 namespace, which is the only thing outside this namespace that should reach them.
 
-EGRESS IS DELIBERATELY NOT RESTRICTED. Locking it down means naming kube-dns
-(53/UDP and 53/TCP), Postgres, Kafka, Redis and the OTLP collector, and in a
-managed setup half of those are IP ranges outside the cluster rather than pod
-selectors. A policy that names some of them fails closed on the rest -- the same
-class of mistake as the ingress trap above -- so it is documented here rather
-than half-written.
+EGRESS (Phase 22) is restricted when networkPolicy.restrictEgress is true: one
+policy per service allowing exactly what that service talks to -- DNS, the other
+pods of this release (gateway -> backends, order-service -> its REST peers, every
+resource server -> user-service's JWKS), its OWN Postgres cluster and nothing
+else's, Kafka only if it has an outbox or listeners, Redis only where listed, and
+the OTLP collector. Every target is named in values; a target the chart cannot
+name (a schema-owning service with no Postgres mapping, a Kafka user with no Kafka
+peer) FAILS the render instead of failing closed at runtime.
+
+QUARANTINE. NetworkPolicies are additive: a deny-all policy on a pod achieves
+nothing while any other policy still allows its traffic. So every allow policy
+here excludes pods carrying networkPolicy.quarantineLabel=true, and a separate
+policy selects exactly those pods with no rules at all. Labelling a pod
+`security.sdp/quarantine=true` therefore cuts every flow to and from it at once,
+while the process keeps running for forensics (docs/runbooks/incident-response.md).
+
 ================================================================================
 */}}
 {{- if .Values.networkPolicy.enabled }}
@@ -40,6 +50,9 @@ spec:
   podSelector:
     matchLabels:
       app.kubernetes.io/part-of: smart-delivery-platform
+    matchExpressions:
+      - key: {{ .Values.networkPolicy.quarantineLabel }}
+        operator: DoesNotExist
   policyTypes:
     - Ingress
   ingress:
@@ -88,6 +101,8 @@ spec:
           {{- if .Values.frontend.enabled }}
           - {{ .Values.frontend.name }}
           {{- end }}
+      - key: {{ .Values.networkPolicy.quarantineLabel }}
+        operator: DoesNotExist
   policyTypes:
     - Ingress
   ingress:
@@ -98,5 +113,170 @@ spec:
       ports:
         - protocol: TCP
           port: http
+{{- end }}
+{{- end }}
+{{- if .Values.networkPolicy.enabled }}
+{{- $root := . }}
+{{- $np := .Values.networkPolicy }}
+---
+# Selects only quarantined pods and allows nothing. Effective because every allow
+# policy in this file excludes the same label (see the header).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "quarantine") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "quarantine") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{ $np.quarantineLabel }}: "true"
+  policyTypes:
+    - Ingress
+    - Egress
+{{- if $np.defaultDenyNamespace }}
+---
+# Everything in the namespace, including pods this chart did not create, starts
+# with no traffic in either direction; the policies above and below are the whole
+# list of exceptions.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "default-deny") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "default-deny") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+{{- end }}
+{{- if $np.restrictEgress }}
+{{- $eg := $np.egress }}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $usesKafka := or $svc.hasOutbox $svc.hasKafkaListeners }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sdp.configName" (dict "root" $root "name" (printf "%s-egress" $name)) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ $name }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+    matchExpressions:
+      - key: {{ $np.quarantineLabel }}
+        operator: DoesNotExist
+  policyTypes:
+    - Egress
+  egress:
+    # DNS. Without it every other rule is moot: nothing resolves.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $eg.kubeDns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $eg.kubeDns.podLabels | nindent 14 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # The other services of this release: gateway -> backends, order-service ->
+    # inventory/payment/user-service, every resource server -> the JWKS.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: smart-delivery-platform
+              app.kubernetes.io/instance: {{ $root.Release.Name }}
+    {{- if $svc.ownsSchema }}
+    {{- $cluster := get (default (dict) $eg.postgres.clusters) $name }}
+    # Its OWN database only -- database-per-service (ADR 001) enforced at the
+    # network layer, so a compromised product-service cannot even open a socket
+    # to order_db.
+    - to:
+        {{- if $cluster }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $eg.postgres.namespace }}
+          podSelector:
+            matchLabels:
+              {{ $eg.postgres.clusterLabel }}: {{ $cluster }}
+        {{- end }}
+        {{- range $cidr := $eg.postgres.ipBlocks }}
+        - ipBlock:
+            cidr: {{ $cidr }}
+        {{- end }}
+      ports:
+        - { protocol: TCP, port: {{ $eg.postgres.port }} }
+    {{- end }}
+    {{- if $usesKafka }}
+    - to:
+        {{- toYaml $eg.kafka.peers | nindent 8 }}
+      ports:
+        {{- range $p := $eg.kafka.ports }}
+        - { protocol: TCP, port: {{ $p }} }
+        {{- end }}
+    {{- end }}
+    {{- if has $name $eg.redis.services }}
+    - to:
+        {{- toYaml $eg.redis.peers | nindent 8 }}
+      ports:
+        {{- range $p := $eg.redis.ports }}
+        - { protocol: TCP, port: {{ $p }} }
+        {{- end }}
+    {{- end }}
+    {{- if $eg.otlp.peers }}
+    - to:
+        {{- toYaml $eg.otlp.peers | nindent 8 }}
+      ports:
+        {{- range $p := $eg.otlp.ports }}
+        - { protocol: TCP, port: {{ $p }} }
+        {{- end }}
+    {{- end }}
+    {{- with $eg.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
+{{- end }}
+{{- if .Values.frontend.enabled }}
+---
+# The SPA's nginx serves static files and, under Kubernetes, proxies nothing (the
+# Ingress routes /api straight to the gateway). It needs no egress beyond DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "frontend-egress") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" .Values.frontend.name) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ .Values.frontend.name }}
+    # Like every allow policy here: a quarantined pod must match none of them.
+    matchExpressions:
+      - key: {{ .Values.networkPolicy.quarantineLabel }}
+        operator: DoesNotExist
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $eg.kubeDns.namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $eg.kubeDns.podLabels | nindent 14 }}
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+{{- end }}
 {{- end }}
 {{- end }}

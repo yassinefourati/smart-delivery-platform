@@ -1,0 +1,58 @@
+{{/*
+Barman Cloud plugin ObjectStores. <cluster>-backup is where this cluster archives WAL
+and writes base backups. In mode=replica there is also <cluster>-origin: the PRIMARY
+region's archive (as replicated into this region), read-only from our side, which
+the replica cluster restores and replays from.
+
+Credentials: inheritFromIAMRole -- the IRSA role on the instance pods' service
+account. No access key exists to leak.
+*/}}
+{{- if .Values.backup.enabled }}
+{{- $root := . }}
+{{- $b := .Values.backup }}
+{{- range $name, $cfg := .Values.clusters }}
+{{- if $cfg.enabled }}
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: {{ include "sdpdata.objectStore" (dict "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root "name" $name) | nindent 4 }}
+spec:
+  {{- with $b.retentionPolicy }}
+  retentionPolicy: {{ . | quote }}
+  {{- end }}
+  configuration:
+    destinationPath: {{ $b.destinationPath | quote }}
+    s3Credentials:
+      inheritFromIAMRole: true
+    wal:
+      compression: {{ $b.compression }}
+      encryption: {{ $b.encryption | quote }}
+      # Archive several segments at once, so a burst of writes (a bulk import, a
+      # backfill) does not queue WAL on the local volume faster than it drains.
+      maxParallel: 4
+    data:
+      compression: {{ $b.compression }}
+      encryption: {{ $b.encryption | quote }}
+      jobs: 2
+{{- if eq $root.Values.mode "replica" }}
+---
+apiVersion: barmancloud.cnpg.io/v1
+kind: ObjectStore
+metadata:
+  name: {{ include "sdpdata.originStore" (dict "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root "name" $name) | nindent 4 }}
+spec:
+  configuration:
+    destinationPath: {{ required "dr.sourceDestinationPath is required in mode=replica" $root.Values.dr.sourceDestinationPath | quote }}
+    s3Credentials:
+      inheritFromIAMRole: true
+{{- end }}
+{{- end }}
+{{- end }}
+{{- end }}

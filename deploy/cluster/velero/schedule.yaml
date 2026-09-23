@@ -1,0 +1,38 @@
+# =============================================================================
+# Velero: the Kubernetes side of recovery (Phase 22).
+#
+# What this backs up: the objects -- Deployments, ConfigMaps, Rollouts, the CNPG
+# Cluster/ScheduledBackup/ObjectStore definitions, NetworkPolicies, ExternalSecrets.
+# That makes "rebuild the namespaces as they were at 02:00" one `velero restore`.
+#
+# What it deliberately does NOT back up: database volumes (snapshotVolumes: false).
+# Crash-consistent block snapshots of a running Postgres are a worse backup than
+# the one CNPG already takes (base backup + continuous WAL = point-in-time), and a
+# second, divergent copy of the data is a restore ambiguity nobody wants at 3 a.m.
+# Secrets are excluded too: they are synced from Secrets Manager by ESO, and the
+# restore procedure re-syncs them rather than resurrecting possibly-rotated values.
+#
+# The Velero bucket should get the same Object Lock treatment as the database one
+# (backup-bucket/create-backup-bucket.sh takes a bucket name).
+# =============================================================================
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: sdp-daily
+  namespace: velero
+spec:
+  schedule: "0 2 * * *"
+  useOwnerReferencesInBackup: false
+  template:
+    includedNamespaces:
+      - sdp
+      - sdp-data
+    excludedResources:
+      - secrets
+      - events
+      - events.events.k8s.io
+      - backups.postgresql.cnpg.io
+    snapshotVolumes: false
+    storageLocation: default
+    # 30 days, matching the database recovery window.
+    ttl: 720h0m0s

@@ -1,0 +1,54 @@
+# =============================================================================
+# Where images may come from, per namespace. A typo-squatted or attacker-chosen
+# image ("postgress:17", "docker.io/someone/order-service") is refused at admission,
+# before any signature question arises.
+#
+#   sdp       our GHCR packages only (which the signature policy then verifies)
+#   sdp-data  CloudNativePG's images: PostgreSQL, the operator's bootstrap init
+#             container, and the Barman Cloud plugin sidecar
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sdp-restrict-image-registries
+  annotations:
+    policies.kyverno.io/title: Restrict image registries
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: high
+spec:
+  background: true
+  rules:
+    - name: application-images
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [sdp]
+      validate:
+        failureAction: Enforce
+        message: "Images in namespace sdp must come from ghcr.io/yassinefourati/smart-delivery-platform/."
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - image: "ghcr.io/yassinefourati/smart-delivery-platform/*"
+            =(initContainers):
+              - image: "ghcr.io/yassinefourati/smart-delivery-platform/*"
+            containers:
+              - image: "ghcr.io/yassinefourati/smart-delivery-platform/*"
+    - name: database-images
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaces: [sdp-data]
+      validate:
+        failureAction: Enforce
+        message: "Images in namespace sdp-data must come from ghcr.io/cloudnative-pg/."
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - image: "ghcr.io/cloudnative-pg/*"
+            =(initContainers):
+              - image: "ghcr.io/cloudnative-pg/*"
+            containers:
+              - image: "ghcr.io/cloudnative-pg/*"

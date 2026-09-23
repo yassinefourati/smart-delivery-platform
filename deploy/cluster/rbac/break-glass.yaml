@@ -1,0 +1,27 @@
+# =============================================================================
+# Break-glass: cluster-admin, for a group NOBODY is a standing member of.
+#
+# The binding exists permanently; membership does not. The group is reached only by
+# assuming the IAM role sdp-break-glass, whose trust policy requires MFA and whose use
+# pages the security channel (a CloudTrail/EventBridge rule on AssumeRole). The EKS
+# control-plane audit log records every request made with it. After use: rotate
+# whatever was touched and write down why it was needed -- repeated break-glass for
+# the same task means a missing, narrower role.
+#
+# Also the only path to `kubectl cnpg psql` (a superuser database session), which
+# pgAudit logs statement by statement (sdp-data: pgaudit.log=all for postgres).
+# =============================================================================
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: sdp-break-glass
+  annotations:
+    sdp.io/owner: security
+subjects:
+  - kind: Group
+    name: sdp:break-glass
+    apiGroup: rbac.authorization.k8s.io
+roleRef:
+  kind: ClusterRole
+  name: cluster-admin
+  apiGroup: rbac.authorization.k8s.io

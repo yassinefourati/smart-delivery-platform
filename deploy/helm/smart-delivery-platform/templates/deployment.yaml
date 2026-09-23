@@ -32,6 +32,12 @@ spec:
   # here means every `helm upgrade` writes the chart's number back and the HPA
   # then scales away from it again -- a fight that shows up as a burst of pod
   # churn on every deploy.
+{{- else if and $root.Values.rollouts.enabled (has $name $root.Values.rollouts.services) }}
+  # An Argo Rollout owns this service's pods (templates/rollouts.yaml): the
+  # Deployment is only its pod template, so it runs none itself. Rendering
+  # replicaCount here would make every `helm upgrade` resurrect pods the Rollout
+  # had scaled away.
+  replicas: 0
 {{- else }}
   replicas: {{ int (default 1 $svc.replicaCount) }}
 {{- end }}
@@ -195,6 +201,15 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: {{ $root.Values.pod.tmpVolume.sizeLimit }}
+        {{- if and $svc.ownsSchema $root.Values.database.tls.enabled }}
+        # The Postgres CA, for sslmode=verify-full (values: database.tls).
+        - name: pg-ca
+          configMap:
+            name: {{ $root.Values.database.tls.caConfigMap }}
+            items:
+              - key: {{ $root.Values.database.tls.caKey }}
+                path: {{ $root.Values.database.tls.caKey }}
+        {{- end }}
       containers:
         - name: {{ $name }}
           image: {{ include "sdp.image" (dict "root" $root "name" $name "svc" $svc) | quote }}
@@ -450,5 +465,10 @@ spec:
           volumeMounts:
             - name: tmp
               mountPath: /tmp
+            {{- if and $svc.ownsSchema $root.Values.database.tls.enabled }}
+            - name: pg-ca
+              mountPath: {{ $root.Values.database.tls.mountPath }}
+              readOnly: true
+            {{- end }}
 {{- end }}
 {{- end }}

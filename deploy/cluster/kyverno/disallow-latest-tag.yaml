@@ -1,0 +1,57 @@
+# =============================================================================
+# `:latest` (or no tag, which means latest) makes a manifest mean different code on
+# different days: `helm rollback` restores the manifest and silently keeps the new
+# image, and nobody can say from the spec what is running. CI publishes :<commit-sha>
+# for every build; that, or a digest, is what a pod may reference.
+# =============================================================================
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: sdp-disallow-latest-tag
+  annotations:
+    policies.kyverno.io/title: Disallow latest and untagged images
+    policies.kyverno.io/category: Supply chain
+    policies.kyverno.io/severity: medium
+spec:
+  background: true
+  rules:
+    # Two patterns, two messages: "no tag at all" and ":latest" are different mistakes.
+    # A digest reference (repo@sha256:...) satisfies both.
+    - name: require-a-tag-or-digest
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  sdp.io/workload-policy: enforced
+      validate:
+        failureAction: Enforce
+        message: "An image must carry a tag or a digest; untagged means :latest."
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - image: "*:*"
+            =(initContainers):
+              - image: "*:*"
+            containers:
+              - image: "*:*"
+    - name: disallow-latest
+      match:
+        any:
+          - resources:
+              kinds: [Pod]
+              namespaceSelector:
+                matchLabels:
+                  sdp.io/workload-policy: enforced
+      validate:
+        failureAction: Enforce
+        message: "Use a commit-SHA tag or a digest, not :latest."
+        pattern:
+          spec:
+            =(ephemeralContainers):
+              - image: "!*:latest"
+            =(initContainers):
+              - image: "!*:latest"
+            containers:
+              - image: "!*:latest"

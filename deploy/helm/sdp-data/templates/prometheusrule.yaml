@@ -1,0 +1,150 @@
+{{/*
+================================================================================
+Database alerts. Grouped by (namespace, cluster) via podmonitor.yaml's relabeling.
+Every alert carries a runbook link; the recovery paths are in
+docs/runbooks/disaster-recovery.md.
+
+The metric names are CloudNativePG's default exporter queries (cnpg_collector_*,
+cnpg_pg_*), except the backup-age metric, which is the Barman Cloud plugin's and is a
+value (monitoring.prometheusRule.backupTimestampMetric) because it has not been
+observed on a live /metrics here. Nothing below has been evaluated against a real
+Prometheus; `promtool check rules` is the CI check (docs/ci-cd.md).
+================================================================================
+*/}}
+{{- if .Values.monitoring.prometheusRule.enabled }}
+{{- $r := .Values.monitoring.prometheusRule }}
+{{- $rb := "https://github.com/yassinefourati/smart-delivery-platform/blob/main/docs/runbooks/disaster-recovery.md" }}
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sdp-data
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" .) | nindent 4 }}
+    {{- with $r.extraLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  groups:
+    - name: sdp-data.availability
+      rules:
+        - alert: SdpPgInstanceDown
+          expr: max by (namespace, cluster, pod) (cnpg_collector_up) == 0
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: "Postgres instance {{ "{{" }} $labels.pod {{ "}}" }} ({{ "{{" }} $labels.cluster {{ "}}" }}) is down"
+            description: "The exporter reports PostgreSQL not running on this instance. CNPG fails over on primary loss by itself; if this is the primary and no failover has happened in 2 minutes, check the operator logs."
+            runbook_url: {{ printf "%s#instance-down" $rb }}
+        - alert: SdpPgNoSynchronousStandby
+          # With dataDurability=required, zero synchronous standbys means COMMITS BLOCK.
+          expr: max by (namespace, cluster) (cnpg_collector_sync_replicas{value="observed"}) < 1
+          for: 2m
+          labels:
+            severity: critical
+            category: availability
+          annotations:
+            summary: "{{ "{{" }} $labels.cluster {{ "}}" }} has no synchronous standby: writes are blocked"
+            description: "Quorum sync replication has no standby to acknowledge. Writes wait until one returns. Restore a standby (usually a Pending pod: zone capacity, PVC) -- do NOT relax dataDurability under incident pressure without deciding to accept data loss."
+            runbook_url: {{ printf "%s#no-synchronous-standby" $rb }}
+        - alert: SdpPgReplicationLagHigh
+          expr: max by (namespace, cluster, pod) (cnpg_pg_replication_lag) > {{ $r.replicationLagSeconds }}
+          for: 5m
+          labels:
+            severity: warning
+            category: availability
+          annotations:
+            summary: "{{ "{{" }} $labels.pod {{ "}}" }} is {{ "{{" }} $value | humanizeDuration {{ "}}" }} behind"
+            description: "A lagging standby lengthens failover (it must catch up before promotion) and, if it is the only sync candidate, stalls commits."
+            runbook_url: {{ printf "%s#replication-lag" $rb }}
+    - name: sdp-data.recoverability
+      rules:
+        - alert: SdpPgWalArchivingFailing
+          # The last failure is newer than the last success: WAL is piling up locally
+          # and the point-in-time-recovery window has stopped advancing.
+          expr: |
+            max by (namespace, cluster) (cnpg_pg_stat_archiver_last_failed_time)
+              > max by (namespace, cluster) (cnpg_pg_stat_archiver_last_archived_time)
+          for: 5m
+          labels:
+            severity: critical
+            category: recoverability
+          annotations:
+            summary: "WAL archiving is failing on {{ "{{" }} $labels.cluster {{ "}}" }}"
+            description: "Every minute this lasts is data a regional disaster would lose, and the WAL volume is filling. Usual causes: the IRSA role, the bucket policy, KMS, or the network policy's 443 egress."
+            runbook_url: {{ printf "%s#wal-archiving-failing" $rb }}
+        - alert: SdpPgWalArchiveStale
+          expr: max by (namespace, cluster) (cnpg_pg_stat_archiver_seconds_since_last_archival) > {{ $r.archiveMaxAgeSeconds }}
+          for: 10m
+          labels:
+            severity: warning
+            category: recoverability
+          annotations:
+            summary: "No WAL archived from {{ "{{" }} $labels.cluster {{ "}}" }} for {{ "{{" }} $value | humanizeDuration {{ "}}" }}"
+            description: "archive_timeout forces a segment switch every 5 minutes on a database with any activity; silence much longer than that means archiving is stuck without reporting failures."
+            runbook_url: {{ printf "%s#wal-archiving-failing" $rb }}
+        - alert: SdpPgBackupStale
+          expr: |
+            (time() - max by (namespace, cluster) ({{ $r.backupTimestampMetric }})) > {{ mul (int $r.backupMaxAgeHours) 3600 }}
+          for: 30m
+          labels:
+            severity: critical
+            category: recoverability
+          annotations:
+            summary: "Newest base backup of {{ "{{" }} $labels.cluster {{ "}}" }} is older than {{ $r.backupMaxAgeHours }}h"
+            description: "Recovery still works from an older backup plus WAL, but takes longer (more WAL to replay) and depends on a longer unbroken WAL chain. kubectl -n {{ .Release.Namespace }} get backups."
+            runbook_url: {{ printf "%s#backup-stale" $rb }}
+        - alert: SdpPgBackupMetricAbsent
+          # A wrong metric name, or a plugin that never reported, must not look like
+          # "no stale backups".
+          expr: absent({{ $r.backupTimestampMetric }})
+          for: 1h
+          labels:
+            severity: warning
+            category: recoverability
+          annotations:
+            summary: "No backup-age metric at all: SdpPgBackupStale cannot fire"
+            description: "Check the metric name in monitoring.prometheusRule.backupTimestampMetric against a live /metrics, and that the Barman Cloud plugin sidecar is running."
+            runbook_url: {{ printf "%s#backup-stale" $rb }}
+    - name: sdp-data.capacity
+      rules:
+        - alert: SdpPgConnectionsNearLimit
+          expr: |
+            sum by (namespace, cluster, pod) (cnpg_backends_total)
+              / max by (namespace, cluster, pod) (cnpg_pg_settings_setting{name="max_connections"})
+              > {{ $r.connectionsRatio }}
+          for: 10m
+          labels:
+            severity: warning
+            category: capacity
+          annotations:
+            summary: "{{ "{{" }} $labels.pod {{ "}}" }} is at {{ "{{" }} $value | humanizePercentage {{ "}}" }} of max_connections"
+            description: "The next scale-out of the owning service will fail to connect. Lower the pool size, cap replicas, or add a Pooler."
+            runbook_url: {{ printf "%s#connections" $rb }}
+        - alert: SdpPgVolumeFilling
+          expr: |
+            min by (namespace, persistentvolumeclaim) (
+              kubelet_volume_stats_available_bytes{namespace="{{ .Release.Namespace }}"}
+                / kubelet_volume_stats_capacity_bytes{namespace="{{ .Release.Namespace }}"}
+            ) < {{ $r.diskFreeRatio }}
+          for: 15m
+          labels:
+            severity: critical
+            category: capacity
+          annotations:
+            summary: "{{ "{{" }} $labels.persistentvolumeclaim {{ "}}" }} has less than {{ mul $r.diskFreeRatio 100 }}% free"
+            description: "A full data volume stops Postgres; a full WAL volume (the -wal PVC) usually means archiving is failing -- check SdpPgWalArchivingFailing first. Grow the PVC via cluster.storage.size (the StorageClass must allow expansion)."
+            runbook_url: {{ printf "%s#volume-filling" $rb }}
+        - alert: SdpPgTransactionIdWraparoundRisk
+          expr: max by (namespace, cluster, datname) (cnpg_pg_database_xid_age) > 1.0e9
+          for: 30m
+          labels:
+            severity: warning
+            category: capacity
+          annotations:
+            summary: "{{ "{{" }} $labels.datname {{ "}}" }} on {{ "{{" }} $labels.cluster {{ "}}" }}: XID age {{ "{{" }} $value {{ "}}" }}"
+            description: "Autovacuum is not keeping up. At ~2 billion Postgres stops accepting writes to prevent wraparound. Look for long-running transactions and blocked autovacuum."
+            runbook_url: {{ printf "%s#xid-wraparound" $rb }}
+{{- end }}

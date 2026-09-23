@@ -125,6 +125,66 @@ spec:
             severity: warning
           annotations:
             summary: "{{ `{{ $labels.job }}` }} is returning more than {{ .Values.observability.prometheusRule.thresholds.httpErrorRate }} 5xx"
+    {{- if .Values.observability.prometheusRule.securityRules }}
+    # ---- security signals (Phase 22) ----------------------------------------
+    # Each one is a question an on-call engineer can act on, and each points at
+    # docs/runbooks/incident-response.md. Runtime detections (a shell in a
+    # container, an unexpected outbound connection) come from Falco straight to
+    # Alertmanager via falcosidekick, not from here -- see deploy/cluster/falco/.
+    - name: sdp-security
+      interval: 30s
+      rules:
+        - alert: SdpAuthFailureSpike
+          # 401s at the edge: credential stuffing, or forged/expired tokens being
+          # replayed. A deploy that broke JWT verification looks the same, which is
+          # a page either way.
+          expr: |
+            sum(rate(http_server_requests_seconds_count{job=~"{{ $jobRegex }}",status="401",uri!~"/actuator.*"}[5m])) > {{ .Values.observability.prometheusRule.thresholds.authFailuresPerSecond }}
+          for: 10m
+          labels:
+            severity: warning
+            category: security
+          annotations:
+            summary: "Sustained 401s across the platform -- credential stuffing or broken token verification"
+            runbook: "docs/runbooks/incident-response.md#detect"
+        - alert: SdpForbiddenSpike
+          # 403s are ownership checks saying no: someone walking other users'
+          # order, address or delivery ids.
+          expr: |
+            sum by (job) (rate(http_server_requests_seconds_count{job=~"{{ $jobRegex }}",status="403",uri!~"/actuator.*"}[5m])) > {{ .Values.observability.prometheusRule.thresholds.forbiddenPerSecond }}
+          for: 10m
+          labels:
+            severity: warning
+            category: security
+          annotations:
+            summary: "{{ `{{ $labels.job }}` }} is refusing an unusual number of requests (403) -- possible enumeration"
+            runbook: "docs/runbooks/incident-response.md#detect"
+        - alert: SdpBusyWithoutTraffic
+          # CPU with no requests to explain it: the classic crypto-miner shape.
+          expr: |
+            sum by (namespace, pod) (rate(container_cpu_usage_seconds_total{namespace="{{ .Release.Namespace }}",container!="",container!="POD"}[10m])) > {{ .Values.observability.prometheusRule.thresholds.idleCpuCores }}
+            unless on (namespace, pod)
+            sum by (namespace, pod) (rate(http_server_requests_seconds_count{job=~"{{ $jobRegex }}",uri!~"/actuator.*"}[10m])) > 0.1
+          for: 15m
+          labels:
+            severity: critical
+            category: security
+          annotations:
+            summary: "{{ `{{ $labels.pod }}` }} is burning CPU with no traffic -- check for a miner (Falco events, process list)"
+            runbook: "docs/runbooks/incident-response.md#contain"
+        - alert: SdpConcurrentOrderReplays
+          # Concurrent same-key order creates absorbed by the Idempotency-Key
+          # (docs/order-flow.md#idempotency). A trickle is double-clicks; a jump
+          # means a client started duplicating requests -- or someone is replaying
+          # captured ones.
+          expr: |
+            sum(increase(order_idempotency_concurrent_replays_total[15m])) > {{ .Values.observability.prometheusRule.thresholds.concurrentReplaysPer15m }}
+          labels:
+            severity: warning
+            category: security
+          annotations:
+            summary: "Unusual number of concurrent duplicate order creates"
+    {{- end }}
     # ---- what is deliberately NOT alerted on -------------------------------
     # No alert on liveness/readiness probe failures: a pod failing readiness drops
     # out of the ServiceMonitor's target list entirely (role: endpoints scrapes

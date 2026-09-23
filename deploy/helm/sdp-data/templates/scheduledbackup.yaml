@@ -1,0 +1,50 @@
+{{/*
+Daily base backups. With continuous WAL archiving these are what bound RECOVERY TIME
+(replay starts from the newest base backup before the target), not what bounds data
+loss -- that is the WAL archive's job. Only a writable cluster takes them: in the DR
+region they start once the clusters are promoted.
+
+Staggered per cluster so six clusters do not read their volumes and upload at the same
+moment. CNPG's cron format has a SECONDS field first.
+*/}}
+{{- $writable := or (eq .Values.mode "primary") .Values.dr.promoted }}
+{{- if and .Values.backup.enabled $writable }}
+{{- $root := . }}
+{{- $i := 0 }}
+{{- range $name, $cfg := .Values.clusters }}
+{{- if $cfg.enabled }}
+{{- $fields := splitList " " $root.Values.backup.schedule }}
+{{- if ne (len $fields) 6 }}
+{{- fail (printf "backup.schedule must have SIX fields (CNPG's cron starts with seconds), got %q" $root.Values.backup.schedule) }}
+{{- end }}
+{{- $minute := add (int (index $fields 1)) (mul $i (int $root.Values.backup.staggerMinutes)) }}
+{{- $hour := index $fields 2 }}
+{{- if and (ge (int $minute) 60) (regexMatch "^[0-9]+$" $hour) }}
+{{- $hour = toString (mod (add (int $hour) (div (int $minute) 60)) 24) }}
+{{- end }}
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: ScheduledBackup
+metadata:
+  name: {{ $name }}-daily
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdpdata.labels" (dict "root" $root "name" $name) | nindent 4 }}
+spec:
+  cluster:
+    name: {{ $name }}
+  schedule: {{ printf "%s %d %s %s %s %s" (index $fields 0) (mod (int $minute) 60) $hour (index $fields 3) (index $fields 4) (index $fields 5) | quote }}
+  immediate: {{ $root.Values.backup.immediate }}
+  # Backups belong to the ScheduledBackup, not the cluster: deleting the Cluster
+  # object must never be able to take the backup catalog's Kubernetes records with it.
+  backupOwnerReference: self
+  method: plugin
+  pluginConfiguration:
+    name: barman-cloud.cloudnative-pg.io
+  # Taken from a standby when one is healthy: a base backup reads the whole data
+  # directory, and the primary is serving writes.
+  target: prefer-standby
+{{- $i = add $i 1 }}
+{{- end }}
+{{- end }}
+{{- end }}

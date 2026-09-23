@@ -237,6 +237,22 @@ database:
   # Flyway settings that only matter under Kubernetes. Compose hides both behind
   # `depends_on: condition: service_healthy`; a Pod is scheduled the moment a node
   # has room for it, whether or not Postgres is accepting connections.
+  # TLS to Postgres (Phase 22). `sslmode=require` encrypts but does not check WHO
+  # answered, so anyone who can intercept the connection can present any
+  # certificate; `verify-full` checks the certificate chain and the hostname. When
+  # enabled, the CA certificate is mounted into every schema-owning pod and the
+  # chart REFUSES a DB_URL that does not say
+  # `sslmode=verify-full&sslrootcert=<mountPath>/<caKey>`.
+  #
+  # A ConfigMap, not a Secret: a CA certificate is public. trust-manager
+  # (deploy/cluster/trust-manager/) copies it from the database namespace into
+  # this one, because a pod cannot mount a Secret from another namespace.
+  tls:
+    enabled: false
+    caConfigMap: sdp-postgres-ca
+    caKey: ca.crt
+    mountPath: /etc/sdp/pg-ca
+
   flyway:
     # Flyway's own default is 0 retries, so a database five seconds behind the pod
     # is a failed context refresh, a non-zero exit, and CrashLoopBackOff whose
@@ -459,6 +475,26 @@ secrets:
     # account creation. README.md documents the one-boot window instead.
 
 # -----------------------------------------------------------------------------
+# externalSecrets -- Secrets synced from a secret manager (Phase 22)
+# -----------------------------------------------------------------------------
+# See templates/externalsecrets.yaml. Each key under `secrets` is the name of a
+# Secret the services' secretEnv already reference; each entry maps a Secret key
+# to a secret-manager reference. Mutually exclusive with secrets.create.
+externalSecrets:
+  enabled: false
+  # v1 is what current ESO releases serve; v1beta1 was deprecated and is no longer
+  # served by recent ones. Set v1beta1 only for an operator older than 0.16.
+  apiVersion: external-secrets.io/v1
+  refreshInterval: 1h
+  storeRef:
+    kind: ClusterSecretStore
+    name: aws-secrets-manager
+  secrets: {}
+  #   sdp-order-db:
+  #     DB_USERNAME: {key: prod/sdp/order-service/db, property: username}
+  #     DB_PASSWORD: {key: prod/sdp/order-service/db, property: password}
+
+# -----------------------------------------------------------------------------
 # pod -- security context and scheduling, shared by all eight services
 # -----------------------------------------------------------------------------
 pod:
@@ -606,11 +642,38 @@ observability:
     enabled: false
     extraLabels:
       release: kube-prometheus-stack
+    # Render the sdp-security alert group (templates/prometheusrule.yaml).
+    securityRules: true
     thresholds:
       # max, not sum: outbox.oldest.pending.age is a DB-global gauge read at
       # scrape time, so every replica reports the same number.
       outboxOldestPendingAgeSeconds: 60
       httpErrorRate: 0.05
+      # sdp-security group (Phase 22). Starting points, not measurements: retune
+      # from a week of real traffic before paging anyone on them.
+      authFailuresPerSecond: 5
+      forbiddenPerSecond: 2
+      idleCpuCores: 0.8
+      concurrentReplaysPer15m: 20
+
+# -----------------------------------------------------------------------------
+# rollouts -- canary releases with automatic rollback (Phase 22)
+# -----------------------------------------------------------------------------
+# See templates/rollouts.yaml. Needs the Argo Rollouts controller. A listed
+# service may not also have autoscaling.enabled: its HPA targets the Deployment,
+# which a Rollout scales to zero (the chart refuses the combination).
+rollouts:
+  enabled: false
+  services: []
+  #  - order-service
+  canaryWeights: [25, 50, 75]
+  pauseBetweenSteps: 2m
+  analysis:
+    prometheusAddress: http://kube-prometheus-stack-prometheus.observability.svc:9090
+    interval: 1m
+    count: 3
+    failureLimit: 1
+    maxErrorRatio: 0.01
 
 # -----------------------------------------------------------------------------
 # networkPolicy
@@ -632,13 +695,54 @@ networkPolicy:
   # Where the ingress controller runs. Only the gateway (and the frontend) need
   # to accept traffic from it.
   ingressControllerNamespace: ingress-nginx
-  # No egress rules. Locking egress down needs DNS (kube-dns on 53/UDP and TCP),
-  # Postgres, Kafka, Redis, the OTLP collector and user-service's JWKS spelled
-  # out, and half of those are outside the cluster in a managed setup. A policy
-  # that names only some of them fails closed on the rest, which is the same
-  # class of mistake as the ingress trap above -- so it is documented rather than
-  # half-written.
+  # Egress allow-lists (Phase 22). Off by default because every target below has
+  # to be named for the cluster it runs in -- and the chart REFUSES to render
+  # rather than fail closed at runtime: a schema-owning service with neither a
+  # Postgres cluster mapping nor an ipBlock, or a Kafka user with no Kafka peer,
+  # is a render error. See templates/networkpolicy.yaml.
   restrictEgress: false
+  # A NetworkPolicy selecting every pod in the namespace with no rules: pods this
+  # chart does not create (a debug pod, a stray Job) start with no traffic too.
+  # Needs restrictEgress, or the platform's own egress dies with it.
+  defaultDenyNamespace: false
+  # `kubectl label pod <p> security.sdp/quarantine=true` cuts every flow to and
+  # from that pod and leaves it running for forensics. Every allow policy excludes
+  # this label; that exclusion is what makes the deny-all actually win.
+  quarantineLabel: security.sdp/quarantine
+  egress:
+    kubeDns:
+      namespace: kube-system
+      podLabels:
+        k8s-app: kube-dns
+    postgres:
+      port: 5432
+      # In-cluster CloudNativePG (deploy/helm/sdp-data): each service may reach
+      # only the pods of ITS cluster, selected by CNPG's own cluster label.
+      namespace: sdp-data
+      clusterLabel: cnpg.io/cluster
+      clusters: {}
+      #   user-service: user-db
+      #   order-service: order-db
+      # Managed Postgres (RDS / Cloud SQL / Azure DB) has no pods to select: list
+      # its subnet CIDRs instead. Applies to every schema-owning service, so pair
+      # it with per-database credentials (it cannot isolate one database's host
+      # from another's when they share a subnet).
+      ipBlocks: []
+    kafka:
+      ports: [9092]
+      # NetworkPolicy peers, e.g.
+      #   - namespaceSelector: {matchLabels: {kubernetes.io/metadata.name: kafka}}
+      peers: []
+    redis:
+      ports: [6379]
+      services: [product-service]
+      peers: []
+    otlp:
+      ports: [4317, 4318]
+      peers: []
+    # Raw egress rules appended to every service's policy (an external API, a
+    # corporate proxy). Keep it empty unless something genuinely needs it.
+    extra: []
 
 # -----------------------------------------------------------------------------
 # ingress -- how the gateway is actually exposed

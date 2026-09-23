@@ -1,0 +1,62 @@
+# =============================================================================
+# Log-based detection (Phase 22): what metrics cannot see. Loaded by the Loki
+# ruler's sidecar (ConfigMaps labelled loki_rule="1" -- the grafana/loki chart's
+# convention); the alerts go to the same Alertmanager, with `category` for routing.
+#
+# Labels assumed: namespace and pod on every stream (the default for Promtail /
+# Grafana Alloy Kubernetes discovery). Check the stream selectors against the
+# agent's actual labels before trusting these; a selector that matches nothing is
+# silent.
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sdp-loki-rules
+  namespace: observability
+  labels:
+    loki_rule: "1"
+data:
+  sdp-security.yaml: |
+    groups:
+      - name: sdp-security-logs
+        rules:
+          # Someone guessing database passwords. The services use pooled connections
+          # that authenticate once, so a stream of failures is not the application.
+          - alert: SdpPgAuthenticationFailures
+            expr: |
+              sum by (pod) (count_over_time({namespace="sdp-data"} |= "password authentication failed" [5m])) > 5
+            for: 1m
+            labels:
+              severity: critical
+              category: security
+            annotations:
+              summary: "Repeated Postgres authentication failures on {{ $labels.pod }}"
+              runbook_url: https://github.com/yassinefourati/smart-delivery-platform/blob/main/docs/runbooks/incident-response.md#credential-attack
+          # A connection refused by pg_hba: a client trying without TLS, or from where
+          # it should not be. The NetworkPolicy should make this impossible, so any
+          # occurrence means a policy gap or a probe.
+          - alert: SdpPgHbaRejection
+            expr: |
+              sum by (pod) (count_over_time({namespace="sdp-data"} |= "pg_hba.conf rejects connection" [10m])) > 0
+            labels:
+              severity: warning
+              category: security
+            annotations:
+              summary: "pg_hba rejected a connection on {{ $labels.pod }}"
+              runbook_url: https://github.com/yassinefourati/smart-delivery-platform/blob/main/docs/runbooks/incident-response.md#credential-attack
+          # DDL outside a deployment. pgAudit logs every DDL; CloudNativePG emits those
+          # records as structured JSON (logger "pgaudit", the audit fields under
+          # record.audit). The only roles that should issue DDL are the *_owner roles
+          # (Flyway, during a rollout) -- the app roles cannot -- so DDL by anything
+          # else is a superuser/break-glass session or worse.
+          - alert: SdpPgUnexpectedDDL
+            expr: |
+              sum by (pod) (count_over_time({namespace="sdp-data"} | json | logger="pgaudit" | record_audit_class="DDL" | record_user_name!~".+_owner" [5m])) > 0
+            labels:
+              severity: critical
+              category: security
+            annotations:
+              summary: "DDL by a non-owner role on {{ $labels.pod }}"
+              runbook_url: https://github.com/yassinefourati/smart-delivery-platform/blob/main/docs/runbooks/incident-response.md#database-tampering
+          # (Falco criticals are not repeated here: falcosidekick sends them straight
+          # to Alertmanager -- deploy/cluster/falco/values.yaml.)

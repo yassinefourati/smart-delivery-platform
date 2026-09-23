@@ -158,6 +158,12 @@ nothing respects. `helm template` surfaces all of them without a cluster.
 ================================================================================
 */}}
 {{- define "sdp.validate" -}}
+{{- /* ---- secrets: one writer per Secret ------------------------------------
+     First on purpose: with both on, the per-service placeholder checks further down
+     would fail first, with a message that hides the real mistake. */ -}}
+{{- if and .Values.externalSecrets.enabled .Values.secrets.create -}}
+{{- fail "externalSecrets.enabled and secrets.create are both true. They would both write the same Secrets -- ESO overwriting the placeholders on every refresh, Helm putting them back on every upgrade. Use one: externalSecrets for a real deployment, secrets.create only to render the wiring." -}}
+{{- end -}}
 
 {{- /* ---- migrations ------------------------------------------------------- */ -}}
 {{- if ne (default "" .Values.migrations.strategy) "startup" -}}
@@ -213,6 +219,71 @@ nothing respects. `helm template` surfaces all of them without a cluster.
 {{- end -}}
 {{- end -}}
 
+{{- end -}}
+{{- end -}}
+
+{{- /* ---- network policy (Phase 22) --------------------------------------- */ -}}
+{{- $np := .Values.networkPolicy -}}
+{{- if and (or $np.restrictEgress $np.defaultDenyNamespace) (not $np.enabled) -}}
+{{- fail "networkPolicy.restrictEgress / defaultDenyNamespace are set but networkPolicy.enabled is false, so nothing would be rendered -- the setting would look like protection and be none. Enable networkPolicy." -}}
+{{- end -}}
+{{- if and $np.defaultDenyNamespace (not $np.restrictEgress) -}}
+{{- fail "networkPolicy.defaultDenyNamespace is true but restrictEgress is false: the namespace-wide deny would block every service's egress (DNS, Postgres, Kafka) with no allow-list to let it back through, and the whole platform stops. Enable restrictEgress and name the targets under networkPolicy.egress." -}}
+{{- end -}}
+{{- if and $np.enabled $np.restrictEgress -}}
+{{- range $name, $svc := .Values.services -}}
+{{- if $svc.enabled -}}
+{{- if and $svc.ownsSchema (not (get (default (dict) $np.egress.postgres.clusters) $name)) (not $np.egress.postgres.ipBlocks) -}}
+{{- fail (printf "networkPolicy.restrictEgress is true but %s owns a schema and has no Postgres egress target: set networkPolicy.egress.postgres.clusters.%s (in-cluster CloudNativePG) or networkPolicy.egress.postgres.ipBlocks (managed Postgres). Rendering without one would cut the service off from its database at the next restart." $name $name) -}}
+{{- end -}}
+{{- if and (or $svc.hasOutbox $svc.hasKafkaListeners) (not $np.egress.kafka.peers) -}}
+{{- fail (printf "networkPolicy.restrictEgress is true but %s uses Kafka and networkPolicy.egress.kafka.peers is empty. Name the brokers (a namespaceSelector/podSelector, or an ipBlock for a managed cluster)." $name) -}}
+{{- end -}}
+{{- if and (has $name $np.egress.redis.services) (not $np.egress.redis.peers) -}}
+{{- fail (printf "networkPolicy.restrictEgress is true but %s is listed in networkPolicy.egress.redis.services and networkPolicy.egress.redis.peers is empty." $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- if .Values.externalSecrets.enabled -}}
+{{- range $name, $svc := .Values.services -}}
+{{- if $svc.enabled -}}
+{{- range $e := default (list) $svc.secretEnv -}}
+{{- if not (hasKey (default (dict) $.Values.externalSecrets.secrets) $e.secretName) -}}
+{{- fail (printf "services.%s.secretEnv references Secret %q, but externalSecrets is enabled and externalSecrets.secrets has no entry for it -- the pod would sit in CreateContainerConfigError. Map it to a secret-manager key." $name $e.secretName) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* ---- Postgres TLS must actually verify the server ---------------------- */ -}}
+{{- if .Values.database.tls.enabled -}}
+{{- $ca := printf "%s/%s" .Values.database.tls.mountPath .Values.database.tls.caKey -}}
+{{- range $name, $svc := .Values.services -}}
+{{- if and $svc.enabled $svc.ownsSchema -}}
+{{- $url := default "" (get (default (dict) $svc.config) "DB_URL") -}}
+{{- if or (not (contains "sslmode=verify-full" $url)) (not (contains (printf "sslrootcert=%s" $ca) $url)) -}}
+{{- fail (printf "database.tls.enabled is true but services.%s.config.DB_URL does not contain sslmode=verify-full and sslrootcert=%s. `require` encrypts without checking who answered, which a man-in-the-middle satisfies; the mounted CA is only used if the URL points at it." $name $ca) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* ---- canary rollouts ---------------------------------------------------- */ -}}
+{{- if .Values.rollouts.enabled -}}
+{{- if not .Values.rollouts.services -}}
+{{- fail "rollouts.enabled is true but rollouts.services is empty, so only an AnalysisTemplate would render and nothing would roll out as a canary. List the services." -}}
+{{- end -}}
+{{- range $name := .Values.rollouts.services -}}
+{{- $svc := index $.Values.services $name -}}
+{{- if not (and $svc $svc.enabled) -}}
+{{- fail (printf "rollouts.services lists %q, which is not an enabled service." $name) -}}
+{{- end -}}
+{{- if dig "autoscaling" "enabled" false $svc -}}
+{{- fail (printf "%s is in rollouts.services and has autoscaling.enabled: its HPA targets the Deployment, which the Rollout scales to zero, so the HPA would fight the Rollout. Disable one (an HPA can target the Rollout instead; that is not wired here)." $name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}
 

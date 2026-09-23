@@ -96,9 +96,13 @@ jobs:
     runs-on: ubuntu-latest
     # Only the publish step needs to write packages; every other step (and every PR
     # build, which never publishes) only needs read access to the checked-out code.
+    # id-token: write lets the signing steps obtain this workflow's OIDC identity from
+    # GitHub, which is what the keyless signature certifies (Phase 22). A PR build never
+    # reaches those steps.
     permissions:
       contents: read
       packages: write
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -171,6 +175,7 @@ jobs:
       # requirement) -- see docs/ci-cd.md if this is ever forked under a mixed-case name.
       # Re-runs the same build, which is a cache hit end to end after the step above.
       - name: Publish image (only from a push to main)
+        id: publish
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
@@ -183,6 +188,45 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=${{ matrix.service }}
 
+      # ---- supply chain (Phase 22, ADR 014) -------------------------------------------
+      # Sign the pushed DIGEST (never a tag, which can move) keylessly: cosign obtains a
+      # short-lived certificate for this workflow's OIDC identity from Sigstore's Fulcio
+      # and records the signature in the Rekor transparency log. There is no signing key
+      # to leak. deploy/cluster/kyverno/verify-image-signatures.yaml admits only images
+      # signed by exactly this workflow on refs/heads/main.
+      #
+      # cosign 2.x, not 3.x: 3.x defaults to the new Sigstore bundle format, and the
+      # admission policy verifies the classic signature format.
+      - name: Install cosign
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+        with:
+          cosign-release: v2.6.5
+
+      # An SPDX SBOM of the image as built, attached as a signed attestation, so "which
+      # running images contain library X?" is a query rather than an investigation.
+      - name: Generate SBOM (SPDX)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: local/${{ matrix.service }}:ci
+          format: spdx-json
+          output: sbom.spdx.json
+          scan-type: image
+          skip-setup-trivy: true
+
+      - name: Sign image and attest SBOM
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.publish.outputs.digest }}
+        run: |
+          cosign sign --yes "$IMAGE"
+          cosign attest --yes --type spdxjson --predicate sbom.spdx.json "$IMAGE"
+          cosign verify "$IMAGE" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            --certificate-identity "https://github.com/${{ github.repository }}/.github/workflows/ci.yml@refs/heads/main" > /dev/null
+          echo "signed and attested: $IMAGE"
+
   compose-config:
     name: Validate docker-compose.yml
     runs-on: ubuntu-latest
@@ -193,18 +237,23 @@ jobs:
       - name: Validate compose configuration
         run: docker compose config --quiet
 
-  # There is no cluster to deploy to, so the Helm chart is never applied -- which makes
-  # rot its most likely failure. This job keeps it honest on every push: it must lint,
-  # render with both values files, validate against the real Kubernetes API schemas, and
-  # a deliberately unsafe render must still be REFUSED, so the guard is known to work.
-  # See docs/kubernetes.md and docs/ci-cd.md.
-  helm-chart:
-    name: Validate Helm chart
+  # There is no cluster to deploy to, so none of the Kubernetes artifacts is ever applied
+  # -- which makes rot their most likely failure. This job keeps them honest on every
+  # push (Phase 20, extended in Phase 22): both charts lint and render in every mode,
+  # every object validates against the real Kubernetes AND CRD schemas with nothing
+  # skipped, every chart guard is fired on purpose, the alert rules parse, the Kyverno
+  # admission policies admit the production render and refuse a :latest / foreign one,
+  # and the Falco rules load. It is one script, so a developer runs exactly what CI
+  # runs: scripts/validate-k8s.sh. See docs/kubernetes.md and docs/ci-cd.md.
+  k8s-manifests:
+    name: Validate Kubernetes manifests
     runs-on: ubuntu-latest
     env:
-      CHART: deploy/helm/smart-delivery-platform
-      # helm template has no cluster to ask, and the chart requires >= 1.25.
       KUBE_VERSION: 1.30.0
+      KUBECONFORM_VERSION: v0.6.7
+      PROMETHEUS_VERSION: 3.5.0
+      LOKI_VERSION: v3.7.8
+      KYVERNO_VERSION: v1.19.1
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -214,34 +263,25 @@ jobs:
         with:
           version: v3.16.3
 
-      - name: Lint
+      # Pinned versions, downloaded from each project's GitHub releases. yq (v4) and
+      # shellcheck are preinstalled on ubuntu-latest.
+      - name: Install validators
         run: |
-          helm lint "$CHART"
-          helm lint "$CHART" -f "$CHART/values-production.yaml"
+          mkdir -p "$HOME/.local/bin" && cd "$HOME/.local/bin"
+          curl -sSfL "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz" | tar xz kubeconform
+          curl -sSfL "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz" \
+            | tar xz --strip-components=1 "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool"
+          curl -sSfL -o lokitool.zip "https://github.com/grafana/loki/releases/download/${LOKI_VERSION}/lokitool-linux-amd64.zip"
+          unzip -q lokitool.zip && mv lokitool-linux-amd64 lokitool && rm lokitool.zip
+          curl -sSfL "https://github.com/kyverno/kyverno/releases/download/${KYVERNO_VERSION}/kyverno-cli_${KYVERNO_VERSION}_linux_x86_64.tar.gz" | tar xz kyverno
+          chmod +x kubeconform promtool lokitool kyverno
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
-      - name: Render
-        run: |
-          helm template sdp "$CHART" --kube-version "$KUBE_VERSION" > rendered-default.yaml
-          helm template sdp "$CHART" --kube-version "$KUBE_VERSION" \
-            -f "$CHART/values-production.yaml" \
-            --set secrets.create=true --set frontend.enabled=true > rendered-full.yaml
-
-      - name: Validate against the Kubernetes API schemas
-        run: |
-          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
-            | tar xz kubeconform
-          # The Prometheus Operator CRDs (ServiceMonitor, PrometheusRule) publish no schema.
-          ./kubeconform -strict -summary -ignore-missing-schemas \
-            -kubernetes-version "$KUBE_VERSION" rendered-default.yaml rendered-full.yaml
-
-      - name: An unsafe grace period must be refused
-        run: |
-          if helm template sdp "$CHART" --kube-version "$KUBE_VERSION" \
-               --set services.order-service.terminationGracePeriodSeconds=10 >/dev/null 2>guard.err; then
-            echo "::error::the grace-period guard did not fire -- the chart would SIGKILL pods mid-shutdown"
-            exit 1
-          fi
-          grep -q "terminationGracePeriodSeconds is 10" guard.err
+      - name: Validate charts, cluster bundle, alert rules and admission policies
+        env:
+          # The Falco check runs the official image (docker is on the runner).
+          RUN_FALCO_CHECK: "1"
+        run: ./scripts/validate-k8s.sh
 
   # The one job that exercises the platform as a platform: eight services started
   # together, finding each other, sharing a broker, carrying an order across process
