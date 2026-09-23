@@ -83,7 +83,7 @@ mvn clean install
 - [Security](docs/security.md)
 - [API documentation (one Swagger UI, at the gateway)](docs/api-documentation.md)
 - [Observability](docs/observability.md)
-- [Testing](docs/testing.md)
+- [Testing](docs/testing.md) -- and [load testing](docs/load-testing.md)
 - [CI/CD](docs/ci-cd.md)
 - [Kubernetes](docs/kubernetes.md)
 - [Security hardening and resilience](docs/security-hardening.md) -- runbooks:
@@ -507,6 +507,54 @@ Built incrementally; each milestone lands only after it builds and its tests pas
   fired; one metric name (Barman's backup age) comes from documentation and has an
   "absent" alert in case it's wrong. The first staging install and the first restore
   drill are the tests of the rest.
+- [x] **Phase 23 -- Capacity: load tests and the three limits they confirmed**
+      ([ADR 015](docs/adr/015-capacity-no-remote-calls-in-transactions.md),
+      [docs/load-testing.md](docs/load-testing.md)). Reading the production values for
+      "would it survive a stress test?" turned up three limits, and a new k6 suite
+      measured them before and after the fixes:
+  - **No remote call runs inside a transaction.** `OrderService.create` priced each line
+    by calling product-service while holding the order's database connection. With
+    product-service 1.5s slow, that pinned order-service's pool of 4, so status reads
+    that never touch product-service failed at the 2s pool timeout. Pricing now runs
+    with no transaction open, between a read-only replay check and a short insert
+    transaction. `OrderCreatePoolIsolationIntegrationTest` proves it with a
+    one-connection pool: a create parked in a product lookup that doesn't answer, and a
+    status read that must still succeed. It returns 503 on the old code and 200 now.
+  - **Pools sized for the real topology.** The chart gains `database.topology`
+    (`shared` | `per-service`). Production is per-service since Phase 22, so `poolMax`
+    goes from 4 to 10, checked against each CloudNativePG cluster's own app-role limit
+    (worst case 8 × 10 = 80 of 120). NOTES does that arithmetic.
+  - **Partitions and consumer threads.** Producers now declare the topics they own
+    (platform-starter `OwnedTopics`, `kafka.topics.*`): 6 partitions, created at
+    startup, and raised on existing topics (shown live: 1 → 6). Consumers run
+    `KAFKA_LISTENER_CONCURRENCY` threads (production 3 × 2 pods). Dead letters now go to
+    `.DLT` with partition `-1`: copying the source partition broke as soon as a DLT had
+    fewer partitions, and delivery-service was still sending to `-dlt`.
+  - **Measurable, and testable again.**
+    - `order.create.pricing` histogram;
+    - alerts `SdpDbPoolSaturated` and `SdpOrderPricingSlow`;
+    - `load/sdp-load.js`: smoke, load, stress, spike and soak profiles, plus a probe
+      that follows orders through the saga;
+    - a manually triggered `Load test` workflow.
+
+  **Measured before and after** on the same 4-core sandbox, with latency injected by a
+  TCP proxy:
+  - **product-service 1.5s slow:**
+    - failed requests went from 4.66% to 0;
+    - status-read p95 went from 2.0s (the pool timeout) to 17ms;
+    - sagas completed went from 40/42 to 179/179.
+
+    The in-transaction fix alone, on the old pool of 4, did the same.
+  - **inventory-service 200ms slow:** every HTTP request succeeded in both versions, but
+    saga p95 went from 45.5s, with a quarter of the probe's orders unpaid after a
+    minute, to 4.3s at production's consumer count.
+  - **Healthy stress run up to 50 iterations/s:** 0 failures, and identical latencies
+    before and after.
+
+  These numbers compare one version with the other; they are not a statement of
+  production capacity. The runs used one pod per service, a shared Postgres, k6 on the
+  same machine, and no replication. The next open item is a rate limit on login: BCrypt,
+  with nothing limiting it.
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

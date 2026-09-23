@@ -129,6 +129,23 @@ initialisation with a message about connections and nothing about replicas. Five
 two replicas of everything at 60, with room for `psql` and Flyway. **Raise it together
 with `max_connections`, or put PgBouncer in front -- never on its own.**
 
+**Phase 23: the budget depends on the topology** ([ADR 015](adr/015-capacity-no-remote-calls-in-transactions.md)).
+That arithmetic assumes one PostgreSQL shared by all six services, which is Compose and
+the chart's default `database.topology: shared`. Since Phase 22 production gives each
+service its own CloudNativePG cluster (`deploy/helm/sdp-data`), so what has to fit is
+each service's `maxReplicas × poolMax` against **its own** cluster's app-role limit, not
+the sum across services. `values-production.yaml` therefore sets
+`topology: per-service`, `poolMax: 10` and `maxConnectionsBudget: 120` (sdp-data's
+`appConnectionLimit`). The worst case is product-service at 8 × 10 = 80. The chart's
+NOTES do whichever sum applies on every install.
+
+The old 4 was a real ceiling, not just a number. The load test in
+[load-testing.md](load-testing.md) shows what a small pool does when anything holds a
+connection for too long. Holding a connection for too long was also the bigger bug, and
+it is fixed separately: no remote call runs inside a transaction any more.
+
+`SdpDbPoolSaturated` fires when requests have waited for a connection for five minutes.
+
 ### Migrations at startup -- the six schema-owning services
 
 ```yaml
@@ -193,6 +210,21 @@ duplicate-handling paths to be exercised after each rolling deploy.**
 
 It does not bound a sick broker: the consumer's close and its partition-revocation
 callback still run inside the same phase.
+
+```yaml
+spring:
+  kafka:
+    listener:
+      concurrency: ${KAFKA_LISTENER_CONCURRENCY:1}   # Phase 23; production: 3
+```
+
+The number of consumer threads per `@KafkaListener` in this pod. It only helps up to the
+topic's partition count, summed across pods. Production runs 2 order-service pods × 3
+threads against 6 partitions, which the producers now create themselves
+(`kafka.topics.*`, [kafka-events.md](kafka-events.md#partitions-and-consumer-concurrency)).
+Each thread takes a database connection only for the short transaction a record needs.
+Nine listeners × 3 threads is still well inside a pool of 10, because a thread holds a
+connection only while it writes, never while it waits on the network.
 
 ### Gateway connection pool -- api-gateway
 

@@ -22,11 +22,16 @@ import org.springframework.security.access.AccessDeniedException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -143,9 +148,11 @@ class OrderServiceTest {
 
         Order winner = orderWithStatus(userId, OrderStatus.CREATED);
         ReflectionTestUtils.setField(winner, "idempotencyRequestHash", RequestFingerprint.of(request));
-        // Empty on the in-transaction check (the winner has not committed yet), present on
-        // the re-read after the unique index refused our insert.
+        // Empty on the pre-check before pricing and on the in-transaction check (the winner
+        // has not committed yet), present on the re-read after the unique index refused our
+        // insert.
         when(orderRepository.findByUserIdAndIdempotencyKey(userId, key))
+                .thenReturn(Optional.empty())
                 .thenReturn(Optional.empty())
                 .thenReturn(Optional.of(winner));
         when(productServiceClient.getProduct(productId))
@@ -171,6 +178,37 @@ class OrderServiceTest {
 
         assertThatThrownBy(() -> service.create(UUID.randomUUID(), null, requestFor(productId, 1)))
                 .isInstanceOf(DataIntegrityViolationException.class);
+    }
+
+    /**
+     * Phase 23 (ADR 015). The product lookups are remote calls, and no remote call may run
+     * while this service holds a database connection: a slow product-service would pin
+     * the (small) pool and starve every other request, including status reads that never
+     * touch product-service. A mock transaction manager cannot show the difference, so
+     * this uses one that marks a transaction active exactly as a real one does.
+     */
+    @Test
+    void productLookupsRunOutsideTheTransactionAndTheInsertRunsInsideIt() {
+        OrderService service = new OrderService(orderRepository, productServiceClient, eventPublisher, meterRegistry,
+                new MarkingTransactionManager());
+        UUID productId = UUID.randomUUID();
+        var snapshot = new ProductSnapshot(productId, "Widget", new BigDecimal("9.99"), true);
+        AtomicReference<Boolean> lookupInTransaction = new AtomicReference<>();
+        AtomicReference<Boolean> insertInTransaction = new AtomicReference<>();
+        when(productServiceClient.getProduct(productId)).thenAnswer(inv -> {
+            lookupInTransaction.set(TransactionSynchronizationManager.isActualTransactionActive());
+            return Optional.of(snapshot);
+        });
+        when(orderRepository.saveAndFlush(any(Order.class))).thenAnswer(inv -> {
+            insertInTransaction.set(TransactionSynchronizationManager.isActualTransactionActive());
+            return inv.getArgument(0);
+        });
+
+        service.create(UUID.randomUUID(), "key-1", requestFor(productId, 2));
+
+        assertThat(lookupInTransaction.get()).as("product lookup ran inside a transaction").isFalse();
+        assertThat(insertInTransaction.get()).as("insert ran inside a transaction").isTrue();
+        assertThat(meterRegistry.get("order.create.pricing").timer().count()).isEqualTo(1);
     }
 
     @Test
@@ -256,5 +294,29 @@ class OrderServiceTest {
 
         assertThatThrownBy(() -> service.cancel(order.getId(), ownerId, false))
                 .isInstanceOf(InvalidOrderStateTransitionException.class);
+    }
+
+    /**
+     * Does no I/O, but -- unlike a Mockito mock -- goes through AbstractPlatformTransactionManager,
+     * which is what marks a transaction active for TransactionSynchronizationManager while
+     * one is open.
+     */
+    private static final class MarkingTransactionManager extends AbstractPlatformTransactionManager {
+        @Override
+        protected Object doGetTransaction() {
+            return new Object();
+        }
+
+        @Override
+        protected void doBegin(Object transaction, TransactionDefinition definition) {
+        }
+
+        @Override
+        protected void doCommit(DefaultTransactionStatus status) {
+        }
+
+        @Override
+        protected void doRollback(DefaultTransactionStatus status) {
+        }
     }
 }

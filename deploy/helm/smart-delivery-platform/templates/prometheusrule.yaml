@@ -108,6 +108,37 @@ spec:
             severity: critical
           annotations:
             summary: "The stuck-saga reaper abandoned a saga and marked an order FAILED"
+    # ---- capacity (Phase 23) ----------------------------------------------------
+    - name: sdp-capacity
+      interval: 30s
+      rules:
+        - alert: SdpDbPoolSaturated
+          # Requests are queuing for a database connection. With a 2s connection timeout
+          # (database.connectionTimeoutMs) the next step is 503s from a pod that is
+          # otherwise healthy -- this fires before that, while it is still only latency.
+          # A load test showed what it looks like when a remote call holds connections:
+          # every status read failing at exactly the pool timeout (ADR 015).
+          expr: |
+            max by (job, pod) (hikaricp_connections_pending{job=~"{{ $jobRegex }}"}) > 0
+          for: 5m
+          labels:
+            severity: warning
+            category: capacity
+          annotations:
+            summary: "{{ `{{ $labels.pod }}` }} has requests waiting for a database connection"
+            description: "Pool is database.poolMax connections per pod. Either the pool is too small for the traffic (raise poolMax within the per-cluster budget NOTES.txt prints) or something holds connections too long -- check hikaricp_connections_usage_seconds and for remote calls inside transactions."
+        - alert: SdpOrderPricingSlow
+          # Pricing is the product-service call a new order waits on, outside any
+          # transaction since Phase 23. Slow here means slow order placement, but no
+          # longer a starved pool.
+          expr: |
+            histogram_quantile(0.95, sum by (le) (rate(order_create_pricing_seconds_bucket{job=~"{{ $jobRegex }}"}[5m]))) > 1
+          for: 10m
+          labels:
+            severity: warning
+            category: capacity
+          annotations:
+            summary: "p95 of pricing a new order from product-service is above 1s"
     # ---- HTTP --------------------------------------------------------------
     - name: sdp-http
       interval: 30s

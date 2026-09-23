@@ -13,11 +13,14 @@
 {{- end }}
 {{- end }}
 {{- $conns := 0 }}
+{{- $worstConns := 0 }}
+{{- $worstService := "" }}
 {{- $dbServices := list }}
 {{- range $name, $svc := .Values.services }}
 {{- if and $svc.enabled $svc.ownsSchema }}
 {{- $ceiling := ternary (int (dig "autoscaling" "maxReplicas" 1 $svc)) (int (default 1 $svc.replicaCount)) (dig "autoscaling" "enabled" false $svc) }}
 {{- $conns = add $conns (mul $ceiling (int $root.Values.database.poolMax)) }}
+{{- if gt (int (mul $ceiling (int $root.Values.database.poolMax))) (int $worstConns) }}{{ $worstConns = mul $ceiling (int $root.Values.database.poolMax) }}{{ $worstService = $name }}{{ end }}
 {{- $dbServices = append $dbServices $name }}
 {{- end }}
 {{- end }}
@@ -214,8 +217,22 @@ e) SHUTDOWN_PHASE_TIMEOUT likewise, plus SCHEDULER_POOL_SIZE on the four service
 --------------------------------------------------------------------------------
  5. DATABASE CONNECTIONS -- THE CEILING THAT ARRIVES BEFORE CPU DOES
 --------------------------------------------------------------------------------
-{{ len $dbServices }} schema-owning services x pool {{ .Values.database.poolMax }} x their replica ceiling = {{ $conns }} connections.
-Budget (database.maxConnectionsBudget): {{ .Values.database.maxConnectionsBudget }}.
+{{- if eq .Values.database.topology "per-service" }}
+database.topology is per-service: each service has its own Postgres cluster, so each
+pool is checked on its own. Worst case: {{ $worstService }} at its replica ceiling x pool
+{{ .Values.database.poolMax }} = {{ $worstConns }} connections, against a per-cluster budget of {{ .Values.database.maxConnectionsBudget }}.
+{{- if gt (int $worstConns) (int .Values.database.maxConnectionsBudget) }}
+
+  *** {{ $worstConns }} EXCEEDS {{ .Values.database.maxConnectionsBudget }}. ***
+  The pods past the limit fail to start (Flyway cannot connect). Lower
+  database.poolMax or that service's maxReplicas, or raise the cluster's
+  appConnectionLimit in deploy/helm/sdp-data.
+{{- else }}
+  Fits, with {{ sub (int .Values.database.maxConnectionsBudget) (int $worstConns) }} to spare on that cluster.
+{{- end }}
+{{- else }}
+{{ len $dbServices }} schema-owning services x pool {{ .Values.database.poolMax }} x their replica ceiling = {{ $conns }} connections,
+all on ONE instance (database.topology: shared). Budget (database.maxConnectionsBudget): {{ .Values.database.maxConnectionsBudget }}.
 {{- if gt (int $conns) (int .Values.database.maxConnectionsBudget) }}
 
   *** {{ $conns }} EXCEEDS {{ .Values.database.maxConnectionsBudget }}. ***
@@ -227,6 +244,7 @@ Budget (database.maxConnectionsBudget): {{ .Values.database.maxConnectionsBudget
 {{- end }}
 {{- else }}
   Fits, with {{ sub (int .Values.database.maxConnectionsBudget) (int $conns) }} left for psql, backups and whatever else connects.
+{{- end }}
 {{- end }}
 
 --------------------------------------------------------------------------------

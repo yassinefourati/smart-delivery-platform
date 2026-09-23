@@ -97,6 +97,10 @@ expect_refused "verify-full TLS with a DB_URL that does not verify" "does not co
     sdp "$APP" --set database.tls.enabled=true
 expect_refused "canary on a service that autoscales" "has autoscaling.enabled" \
     sdp "$APP" -f "$APP/values-production.yaml" --set 'rollouts.services={api-gateway}'
+expect_refused "an unknown database topology" "database.topology must be" \
+    sdp "$APP" --set database.topology=sharded
+expect_refused "zero Kafka partitions" "kafka.topics.partitions must be at least 1" \
+    sdp "$APP" --set kafka.topics.partitions=0
 expect_refused "a database cluster of two" "Three is the floor" \
     sdp-data "$DATA" --set cluster.instances=2
 expect_refused "a superuser password" "enableSuperuserAccess=true" \

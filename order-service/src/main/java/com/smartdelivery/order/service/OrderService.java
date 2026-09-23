@@ -14,6 +14,7 @@ import com.smartdelivery.order.exception.ProductNotAvailableException;
 import com.smartdelivery.order.exception.ProductNotFoundException;
 import com.smartdelivery.order.repository.OrderRepository;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
@@ -23,6 +24,7 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
 
+import java.util.Optional;
 import java.util.UUID;
 
 @Service
@@ -33,6 +35,8 @@ public class OrderService {
     private final OrderEventPublisher eventPublisher;
     private final MeterRegistry meterRegistry;
     private final TransactionTemplate transactionTemplate;
+    private final TransactionTemplate readOnlyTransactionTemplate;
+    private final Timer pricingTimer;
 
     public OrderService(OrderRepository orderRepository, ProductServiceClient productServiceClient,
                          OrderEventPublisher eventPublisher, MeterRegistry meterRegistry,
@@ -42,6 +46,13 @@ public class OrderService {
         this.eventPublisher = eventPublisher;
         this.meterRegistry = meterRegistry;
         this.transactionTemplate = new TransactionTemplate(transactionManager);
+        this.readOnlyTransactionTemplate = new TransactionTemplate(transactionManager);
+        this.readOnlyTransactionTemplate.setReadOnly(true);
+        this.pricingTimer = Timer.builder("order.create.pricing")
+                .description("Time spent pricing a new order's lines from product-service, outside any transaction")
+                // Buckets, so the capacity alert (SdpOrderPricingSlow) can take a p95.
+                .publishPercentileHistogram()
+                .register(meterRegistry);
     }
 
     /**
@@ -56,13 +67,35 @@ public class OrderService {
      * otherwise re-announce an order that was already announced the first time.
      *
      * The transaction is explicit (a TransactionTemplate, not {@code @Transactional}) so
-     * that the one path which must run OUTSIDE it -- recovering from a concurrent
-     * duplicate, below -- can.
+     * that what must run OUTSIDE it can: recovering from a concurrent duplicate, below,
+     * and -- since Phase 23 (ADR 015) -- the calls to product-service. Three steps:
+     *
+     * 1. Replay check, in a short read-only transaction of its own. A retried request
+     *    whose order already exists is answered from this database alone, without
+     *    calling product-service at all -- so a retry still works while it is down.
+     * 2. Pricing, with NO transaction open and therefore no pooled connection held. This
+     *    is the remote call, and it can take as long as product-service does (retries
+     *    included, seconds). Inside the transaction it pinned a connection for all of
+     *    that time; the pool is a handful of connections per pod, so a slow
+     *    product-service used to starve every other request in this service of the
+     *    database -- status reads, the saga's listeners, the outbox -- which then failed
+     *    with 503s at the pool timeout. A load test measured exactly that
+     *    (docs/load-testing.md, OrderCreatePoolIsolationIntegrationTest).
+     * 3. The transaction, local work only: re-check the key (another request may have
+     *    created the order while we were pricing), insert, outbox row.
      */
     public Order create(UUID userId, String idempotencyKey, CreateOrderRequest request) {
         String requestHash = RequestFingerprint.of(request);
+        if (idempotencyKey != null) {
+            Optional<Order> existing = readOnlyTransactionTemplate.execute(
+                    status -> orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey));
+            if (existing != null && existing.isPresent()) {
+                return reconcileReplay(existing.get(), requestHash, idempotencyKey);
+            }
+        }
+        Order draft = pricingTimer.record(() -> buildOrder(userId, idempotencyKey, requestHash, request));
         try {
-            return transactionTemplate.execute(status -> createOnce(userId, idempotencyKey, requestHash, request));
+            return transactionTemplate.execute(status -> createOnce(userId, idempotencyKey, requestHash, draft));
         } catch (DataIntegrityViolationException e) {
             if (idempotencyKey == null) {
                 throw e;
@@ -84,18 +117,19 @@ public class OrderService {
     }
 
     /**
-     * One attempt, in one transaction: the replay check, the insert and the outbox row
-     * commit together or not at all. A unique-constraint loss escapes as
-     * {@link DataIntegrityViolationException} after the transaction has rolled back.
+     * One attempt, in one transaction, with nothing remote in it: the replay re-check, the
+     * insert of the already-priced order and the outbox row commit together or not at
+     * all. A unique-constraint loss escapes as {@link DataIntegrityViolationException}
+     * after the transaction has rolled back.
      */
-    private Order createOnce(UUID userId, String idempotencyKey, String requestHash, CreateOrderRequest request) {
+    private Order createOnce(UUID userId, String idempotencyKey, String requestHash, Order draft) {
         if (idempotencyKey != null) {
             var existing = orderRepository.findByUserIdAndIdempotencyKey(userId, idempotencyKey);
             if (existing.isPresent()) {
                 return reconcileReplay(existing.get(), requestHash, idempotencyKey);
             }
         }
-        Order saved = orderRepository.saveAndFlush(buildOrder(userId, idempotencyKey, requestHash, request));
+        Order saved = orderRepository.saveAndFlush(draft);
         eventPublisher.publishOrderCreated(saved);
         return saved;
     }

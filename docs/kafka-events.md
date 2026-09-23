@@ -151,7 +151,58 @@ handle:
   (Spring Kafka's `DefaultErrorHandler` with a `FixedBackOff`); once exhausted, the
   message is published to a `<topic>.DLT` dead-letter topic (`DeadLetterPublishingRecoverer`)
   instead of blocking the partition forever or being silently dropped. A message that
-  can never be parsed hits this same path -- see `OrderSagaEventListener`.
+  can never be parsed hits this same path -- see `OrderSagaEventListener`. All three
+  consuming services (order, delivery, notification) name the `.DLT` suffix explicitly;
+  until Phase 23 delivery-service still used Spring's default `-dlt`, so its dead letters
+  went to a topic nobody was watching. The dead letter is sent with partition `-1`, so
+  the producer picks the partition from the record key (the aggregate id) -- see
+  [Partitions and consumer concurrency](#partitions-and-consumer-concurrency) for why
+  copying the source partition number was a trap.
+
+## Partitions and consumer concurrency
+
+Phase 23, [ADR 015](adr/015-capacity-no-remote-calls-in-transactions.md). A consumer
+group never has more active consumers than its topic has partitions, so the partition
+count is the ceiling on how many threads, across all pods, can process a topic in
+parallel. Until this phase the services never created their topics. They got whatever
+the broker auto-created (1 partition on Compose and on many managed brokers), and each
+listener ran Spring's default single thread, so every saga step went through one thread
+per topic platform-wide.
+
+- **Each producing service declares the topics it owns.** platform-starter's
+  `OwnedTopics` turns a service's `KafkaTopics` constants into Spring Kafka `NewTopic`s,
+  and each producer has an `OwnedKafkaTopics` configuration listing its own topics.
+  `KafkaAdmin` creates missing topics at startup and **raises** the partition count of
+  existing ones (it never lowers it: Kafka can't). Consumers never declare topics they
+  don't own.
+
+  | Property (env) | Default | Compose | Production values |
+  |---|---|---|---|
+  | `kafka.topics.create` (`KAFKA_TOPICS_CREATE`) | `false` | `true` | `true` |
+  | `kafka.topics.partitions` (`KAFKA_TOPICS_PARTITIONS`) | `6` | `6` | `6` |
+  | `kafka.topics.replicas` (`KAFKA_TOPICS_REPLICAS`) | `-1` (broker default) | `-1` | `3` |
+
+  Creation is off by default, so a test context without a broker never waits on an
+  admin connection, and so an organisation whose topics are owned by infrastructure-as-
+  code leaves it off and sets the same partition count there.
+- **Consumers run several threads.** `spring.kafka.listener.concurrency`
+  (`KAFKA_LISTENER_CONCURRENCY`, default `1`; Compose and production `3`) applies to
+  every `@KafkaListener` in order-, delivery- and notification-service. Production has
+  2 order-service pods × 3 threads = 6 consumers per group, one per partition.
+  Threads beyond the partition count sit idle, so raise partitions first.
+- **Ordering is unchanged.** The outbox sends with key = aggregate id, so all of one
+  order's events hash to one partition and one thread. Adding partitions changes which
+  partition a key maps to. While a change settles, events of *different* orders can be
+  reordered relative to each other, which the saga tolerates. Events of one order remain
+  ordered after that.
+- **Dead letters use partition `-1`.** The resolvers used to copy the source partition
+  number onto `<topic>.DLT`. That only works while the DLT has at least as many
+  partitions as its source; a DLT auto-created with 1 partition would make the recoverer
+  fail for every record from partitions 1-5. `-1` lets the producer choose from the key.
+
+The load test in [load-testing.md](load-testing.md) shows the effect: with 200 ms of
+latency injected in front of inventory-service, one thread per topic let the backlog
+grow until a quarter of the probe's orders hadn't finished their saga within a minute.
 
 ## Why the envelope is duplicated per service, not shared
 

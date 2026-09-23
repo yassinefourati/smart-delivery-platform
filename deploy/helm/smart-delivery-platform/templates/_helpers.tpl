@@ -165,6 +165,17 @@ nothing respects. `helm template` surfaces all of them without a cluster.
 {{- fail "externalSecrets.enabled and secrets.create are both true. They would both write the same Secrets -- ESO overwriting the placeholders on every refresh, Helm putting them back on every upgrade. Use one: externalSecrets for a real deployment, secrets.create only to render the wiring." -}}
 {{- end -}}
 
+{{- /* ---- database topology (Phase 23): what poolMax is checked against ------ */ -}}
+{{- if not (has (default "shared" .Values.database.topology) (list "shared" "per-service")) -}}
+{{- fail (printf "database.topology must be \"shared\" (all six databases on one instance) or \"per-service\" (one cluster each, deploy/helm/sdp-data), got %q" .Values.database.topology) -}}
+{{- end -}}
+{{- if lt (int .Values.kafka.topics.partitions) 1 -}}
+{{- fail (printf "kafka.topics.partitions must be at least 1, got %v" .Values.kafka.topics.partitions) -}}
+{{- end -}}
+{{- if lt (int .Values.kafka.listenerConcurrency) 1 -}}
+{{- fail (printf "kafka.listenerConcurrency must be at least 1, got %v" .Values.kafka.listenerConcurrency) -}}
+{{- end -}}
+
 {{- /* ---- migrations ------------------------------------------------------- */ -}}
 {{- if ne (default "" .Values.migrations.strategy) "startup" -}}
 {{- fail (printf "migrations.strategy is %q; the only supported value is \"startup\". A pre-upgrade Job needs a migrate-and-exit mode these images do not have: FLYWAY_ENABLED=false is half of one, but four of the six schema-owning services carry @EnableScheduling, Spring's ThreadPoolTaskScheduler threads are non-daemon, and there is no spring.task.scheduling.enabled property in Boot 3.5 -- so a migrate pod would migrate and then sit there forever, the Job would never complete, and it would fail the helm upgrade at activeDeadlineSeconds. See README.md, \"Migrations\"." .Values.migrations.strategy) -}}

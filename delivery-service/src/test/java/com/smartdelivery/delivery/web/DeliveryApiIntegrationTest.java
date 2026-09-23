@@ -221,6 +221,28 @@ class DeliveryApiIntegrationTest {
                         .andExpect(jsonPath("$.status").value("DELIVERED")));
     }
 
+    // --- Phase 23: dead letters go where the platform looks for them (ADR 015) ---
+
+    /**
+     * Until Phase 23 this service left the dead-letter destination to Spring Kafka's
+     * default, {@code <topic>-dlt}, so a poison {@code payment.completed} went to a topic no
+     * doc, alert or operator watches -- order- and notification-service had been fixed in
+     * Phase 16, this one was missed. After the three retries the message must be on
+     * {@code payment.completed.DLT}, byte for byte, still carrying its key: the resolver
+     * leaves the partition to the producer (-1), which picks it from that key.
+     */
+    @Test
+    void aMessageThatCanNeverBeParsedEndsUpOnTheDotDltTopic() throws Exception {
+        String key = UUID.randomUUID().toString();
+        testProducer.send(new ProducerRecord<>(KafkaTopics.PAYMENT_COMPLETED, key, "this is not valid json"))
+                .get(10, TimeUnit.SECONDS);
+
+        var deadLetter = consumeOne(KafkaTopics.PAYMENT_COMPLETED + ".DLT", Duration.ofSeconds(30));
+
+        assertThat(deadLetter.value()).isEqualTo("this is not valid json");
+        assertThat(deadLetter.key()).isEqualTo(key);
+    }
+
     // --- Phase 16: this service can verify a token but could never mint one (ADR 007) ---
 
     /**
