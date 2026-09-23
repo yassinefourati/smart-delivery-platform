@@ -13,8 +13,12 @@
   drift from what a developer runs locally. Surefire reports *and* the JaCoCo/SpotBugs
   reports are uploaded as build artifacts on every run, pass or fail, so a failure's
   actual output is one click away instead of buried in the raw log.
+- **`frontend`** (Phase 21) — `npm ci`, then typecheck, lint (zero warnings), the
+  Vitest suite with its coverage floors, and a production build, for the React app in
+  `frontend/`. The same four commands run inside `frontend/Dockerfile`, so an image cannot
+  be built from code that fails them. See [docs/frontend.md](frontend.md).
 - **`docker-build`** — builds each of the 8 services' Docker images from their
-  `Dockerfile`s, matrix'd so one service's build failing doesn't block the others from
+  `Dockerfile`s, plus the frontend's (since Phase 21, from `frontend/` as its build context), matrix'd so one service's build failing doesn't block the others from
   reporting. Every push and PR gets a real build (proving the `Dockerfile` still
   produces a working image), cached via `type=gha` so a small code change doesn't
   re-resolve every Maven dependency from scratch. Since Phase 18 the image is built with
@@ -26,7 +30,10 @@
   one.
 - **`e2e-smoke`** — runs `scripts/e2e-smoke.sh` against the real `docker-compose.yml`
   stack: `docker compose up -d --build`, wait for health, then drive a complete customer
-  journey **through the gateway only**. See [the section below](#end-to-end-smoke-test).
+  journey **through the gateway only**. Since Phase 21 it also checks the web tier on
+  :8088 -- the SPA shell with its CSP header, the history fallback for a deep link, and
+  `/api` proxied same-origin -- three things that work in `npm run dev` regardless and
+  can only break in the production nginx. See [the section below](#end-to-end-smoke-test).
 - **`compose-config`** — `docker compose config --quiet`, validating `docker-compose.yml`
   parses and every variable substitution resolves, on every push and PR.
 - **`helm-chart`** (Phase 20) — `helm lint`, then `helm template` with the default values
@@ -40,8 +47,8 @@
 ## Published images
 
 `ghcr.io/yassinefourati/smart-delivery-platform/<service>:latest` (and
-`:<commit-sha>` for a specific build) for each of the 8 services, published on every
-push to `main`. No extra registry secret is needed — GHCR accepts the workflow's own
+`:<commit-sha>` for a specific build) for each of the 8 services and, since Phase 21,
+`frontend`, published on every push to `main`. No extra registry secret is needed — GHCR accepts the workflow's own
 automatic `GITHUB_TOKEN`, scoped to `packages: write` at the job level only (every other
 job, and every step in this job before the publish, only needs `contents: read`).
 

@@ -138,3 +138,17 @@ silently returning an unrelated order for a reused key would be worse than an er
 Two concurrent requests with the same brand-new key both fall through to `INSERT`; the
 unique constraint lets exactly one succeed, and the loser re-reads and returns the
 winner's row instead of surfacing the database error to its caller.
+
+**Until Phase 21 that last sentence was not true on PostgreSQL.** The re-read ran inside
+the same transaction as the failed `INSERT`, and PostgreSQL aborts a transaction at its
+first error -- so the re-read itself failed (`current transaction is aborted`) and the
+loser got a `500`. It was the frontend's live walk-through that found it: a real
+double-click sends two POSTs before the button can disable itself, which is exactly the
+case the key exists for. `OrderService.create` now runs the attempt in an explicit
+`TransactionTemplate` and does the re-read *after* it has rolled back; the winner has
+committed by then, because the unique index made the loser's `INSERT` wait for it.
+`ConcurrentIdempotentCreateIntegrationTest` forces the race with a barrier against real
+PostgreSQL and was run against both versions: it fails on the old code with the same
+error the walk-through logged, and passes on the new. Each recovered duplicate increments
+`order_idempotency_concurrent_replays_total`. The frontend also stopped sending the
+second request (a synchronous in-flight guard) -- but the server is the guarantee.

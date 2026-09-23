@@ -365,6 +365,31 @@ services:
       retries: 10
       start_period: 30s
 
+  # The React SPA (frontend/, docs/frontend.md). This nginx is the single origin for the
+  # browser: it serves the bundle and proxies /api and /.well-known to the gateway, which is
+  # why the app needs no CORS and can use connect-src 'self'. gateway-proxy.conf is mounted
+  # rather than baked in because under Kubernetes the Ingress does that routing instead.
+  # Port 8088 because 3000 is Grafana and 8080-8087 are the services.
+  web:
+    <<: *service-defaults
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sdp-web
+    mem_limit: 128m
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./frontend/nginx/gateway-proxy.conf:/etc/nginx/sdp/gateway-proxy.conf:ro
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/index.html"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   prometheus:
     image: prom/prometheus:v3.7.3
     container_name: sdp-prometheus

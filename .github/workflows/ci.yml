@@ -53,9 +53,46 @@ jobs:
           path: '**/target/surefire-reports/*.txt'
           if-no-files-found: ignore
 
+  # The React SPA's own gate -- the same four commands frontend/Dockerfile runs, so an image
+  # cannot be built from code that fails them. See docs/frontend.md.
+  frontend:
+    name: Frontend (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formatting
+        run: npm run format:check
+
+      - name: Test (with coverage floors)
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
   docker-build:
     name: Docker build (${{ matrix.service }})
-    needs: build-and-test
+    needs: [build-and-test, frontend]
     runs-on: ubuntu-latest
     # Only the publish step needs to write packages; every other step (and every PR
     # build, which never publishes) only needs read access to the checked-out code.
@@ -74,6 +111,7 @@ jobs:
           - payment-service
           - delivery-service
           - notification-service
+          - frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,7 +125,9 @@ jobs:
       - name: Build image locally
         uses: docker/build-push-action@v6
         with:
-          context: .
+          # The Java images build from the repo root (they need the parent POM); the SPA
+          # builds from frontend/, and its .dockerignore keeps node_modules out.
+          context: ${{ matrix.service == 'frontend' && 'frontend' || '.' }}
           file: ${{ matrix.service }}/Dockerfile
           load: true
           tags: local/${{ matrix.service }}:ci
@@ -128,7 +168,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.service == 'frontend' && 'frontend' || '.' }}
           file: ${{ matrix.service }}/Dockerfile
           push: true
           tags: |

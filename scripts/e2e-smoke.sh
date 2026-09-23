@@ -22,6 +22,8 @@
 set -Eeuo pipefail
 
 GATEWAY="${GATEWAY:-http://localhost:8080}"
+# The frontend's nginx (docker-compose.yml `web`), the browser's single origin.
+WEB="${WEB_BASE_URL:-http://localhost:8088}"
 LOG_DIR="${LOG_DIR:-target/e2e-logs}"
 ADMIN_EMAIL="${BOOTSTRAP_ADMIN_EMAIL:-admin@smart-delivery.local}"
 ADMIN_PASSWORD="${BOOTSTRAP_ADMIN_PASSWORD:-local-dev-only-admin-password}"
@@ -109,6 +111,34 @@ done
 unhealthy="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$2 != "" && $2 != "healthy"' || true)"
 [ -z "$unhealthy" ] || fail "some services are not healthy: $unhealthy"
 pass "all services healthy, gateway answering on $GATEWAY"
+
+# --- the web tier ------------------------------------------------------------------
+# Three things only the production nginx can get wrong, and each one works in `npm run dev`
+# regardless -- which is exactly why they are asserted here (docs/frontend.md).
+
+step "Checking the web tier on $WEB"
+deadline=$(( $(date +%s) + 60 ))
+until [ "$(curl -s -o /dev/null -w '%{http_code}' "$WEB/index.html")" = "200" ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || fail "the web tier did not answer on $WEB within 60s"
+    sleep 2
+done
+
+# 1. The SPA shell, with the security headers on it.
+headers="$(curl -sS -D - -o "$BODY_FILE" "$WEB/")"
+grep -q '<div id="root">' "$BODY_FILE" || fail "GET $WEB/ did not return the SPA shell"
+echo "$headers" | grep -qi "^content-security-policy:.*frame-ancestors 'none'" \
+    || fail "GET $WEB/ is missing the Content-Security-Policy header"
+
+# 2. The history fallback: a deep link has no file, and must still get index.html.
+status=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' "$WEB/orders/00000000-0000-0000-0000-000000000000")
+expect_status 200 "$status" "deep link through the history fallback"
+grep -q '<div id="root">' "$BODY_FILE" || fail "a deep link did not fall back to index.html"
+
+# 3. Same-origin API routing: the browser calls /api on the web origin, never :8080.
+status=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' "$WEB/api/v1/products?size=1")
+expect_status 200 "$status" "GET /api/v1/products through the web origin"
+[ "$(field '.content | type')" = "array" ] || fail "the web origin did not proxy /api to the gateway"
+pass "web tier: shell + CSP, history fallback, and /api proxied same-origin"
 
 # --- identities --------------------------------------------------------------------
 

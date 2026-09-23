@@ -24,6 +24,7 @@ architecture. See [docs/architecture.md](docs/architecture.md) for the full pict
 | `payment-service` | Mock payment processing | 8085 |
 | `delivery-service` | Shipments, delivery agents, delivery status | 8086 |
 | `notification-service` | Kafka-driven customer notifications | 8087 |
+| `frontend` (`web`) | React SPA for customers and staff, behind nginx on the API's origin | 8088 |
 
 One more module is not a service: `platform-starter` is a library the six API services
 depend on, holding the cross-cutting infrastructure they used to each carry a copy of --
@@ -58,8 +59,10 @@ docker compose up -d --build
 This builds and starts every service plus Postgres, Kafka, and Redis on one shared
 Docker network. Each service exposes a health check at
 `http://localhost:<port>/actuator/health`; the gateway waits for all backend services
-to report healthy before starting. See [docs/local-development.md](docs/local-development.md)
-for running a single service outside Docker, database access, and troubleshooting.
+to report healthy before starting. Then open **<http://localhost:8088>** for the web app
+(storefront and staff screens; [docs/frontend.md](docs/frontend.md)). See
+[docs/local-development.md](docs/local-development.md) for running a single service
+outside Docker, database access, and troubleshooting.
 
 To build and test everything without Docker:
 
@@ -82,6 +85,7 @@ mvn clean install
 - [Testing](docs/testing.md)
 - [CI/CD](docs/ci-cd.md)
 - [Kubernetes](docs/kubernetes.md)
+- [Frontend](docs/frontend.md)
 - [Local development](docs/local-development.md)
 - [Architecture Decision Records](docs/adr)
 
@@ -415,6 +419,34 @@ Built incrementally; each milestone lands only after it builds and its tests pas
       different key under the same `kid` and fail roughly half of all tokens, forever. A new
       `helm-chart` CI job keeps it rendering. **None of it has been applied to a cluster**:
       there is no cluster. See [docs/kubernetes.md](docs/kubernetes.md).
+- [x] **Phase 21 -- The frontend**: a React 19 + TypeScript single-page app covering all
+      four personas -- a storefront with live stock, cart, checkout and a live order
+      tracker, and staff screens for catalog, warehouses and stock, dispatch, order
+      lookup and delivery completion -- served from the API's own origin by an
+      unprivileged nginx ([ADR 011](docs/adr/011-same-origin-react-spa.md)), with the
+      token held in memory only ([ADR 012](docs/adr/012-access-token-in-memory-only.md))
+      and every response validated at the boundary
+      ([ADR 013](docs/adr/013-boundary-validated-api-contract.md)). The part that
+      mattered most is the `Idempotency-Key`: minted when checkout opens, never in the
+      click handler, reused across double-clicks, retries, refreshes and the re-login a
+      token expiry forces, and rotated only when the order itself changes -- with a test
+      that records every key the server sees in each of those cases. **Building it
+      against the live platform found a real backend bug**: two concurrent requests with
+      the same key made order-service return `500` instead of replaying, because its
+      recovery path re-read the winning order inside a transaction PostgreSQL had
+      already aborted, so the one situation the key exists for -- a double-click -- failed.
+      Fixed with an explicit transaction boundary, proven by a new integration test that
+      forces the race against real PostgreSQL and fails on the old code with the exact
+      error the walk-through logged, and confirmed live (four concurrent POSTs, one order,
+      `order_idempotency_concurrent_replays_total` = 3). The screens say what the API
+      cannot do rather than papering over it: stock rows are create-only, there is no
+      all-orders endpoint (so order lookup is deliberately not a half-list that would hide
+      stuck orders), and agents cannot see addresses. 347 frontend tests; a Playwright
+      walk-through of the built bundle through the production nginx config against all
+      eight services; new `frontend` CI job, image in the build/scan/publish matrix, and
+      three web-tier assertions in the smoke test. The Docker image itself was not built
+      here (no Docker daemon); CI builds and scans it. See
+      [docs/frontend.md](docs/frontend.md).
 
 All eight backend services now have real business logic end to end. Placing an order
 actually reserves inventory, charges a (mock) payment, creates a shipment, can be

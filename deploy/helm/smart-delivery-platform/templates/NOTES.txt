@@ -262,7 +262,7 @@ public host; that is correct behaviour, not a bug.
   PrometheusRule ....... {{ if .Values.observability.prometheusRule.enabled }}on{{ else }}OFF  (nothing alerts -- and liveness is livenessState only, so a service that is up and broken is never restarted; that detection was moved to these alerts on purpose){{ end }}
   NetworkPolicy ........ {{ if .Values.networkPolicy.enabled }}on{{ else }}OFF{{ end }}
   Ingress .............. {{ if .Values.ingress.enabled }}on  ({{ .Values.ingress.host }}){{ else }}OFF  (the gateway is not reachable from outside the cluster){{ end }}
-  React frontend ....... {{ if .Values.frontend.enabled }}on{{ else }}OFF  (no image is published for it yet){{ end }}
+  React frontend ....... {{ if .Values.frontend.enabled }}on{{ else }}OFF  (set frontend.enabled=true to deploy the SPA){{ end }}
   HPAs ................. {{ $hpas := list }}{{ range $n, $s := .Values.services }}{{ if and $s.enabled (dig "autoscaling" "enabled" false $s) }}{{ $hpas = append $hpas $n }}{{ end }}{{ end }}{{ if $hpas }}{{ join ", " $hpas }}{{ else }}none{{ end }}
   PodDisruptionBudgets . {{ if .Values.podDisruptionBudget.enabled }}on, except for any service at one replica (a PDB there hangs every node drain){{ else }}OFF{{ end }}
   topologySpread ....... {{ if .Values.topologySpread.enabled }}on ({{ .Values.topologySpread.whenUnsatisfiable }}){{ else }}OFF{{ end }}

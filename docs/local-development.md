@@ -27,6 +27,7 @@ Starts, on one Docker network (`smart-delivery-net`):
 | `sdp-payment-service` | | 8085 |
 | `sdp-delivery-service` | | 8086 |
 | `sdp-notification-service` | | 8087 |
+| `sdp-web` | The React SPA behind nginx; proxies `/api` to the gateway -- **open this one** | 8088 |
 | `sdp-prometheus` | Metrics, scraping every service's `/actuator/prometheus` | 9090 |
 | `sdp-tempo` | Distributed tracing backend (OTLP ingest + query) | 3200, 4318 |
 | `sdp-grafana` | Dashboards, provisioned Prometheus + Tempo datasources | 3000 |
@@ -45,6 +46,12 @@ Once the stack is up, every service's API is browsable from one page:
 (see [api-documentation.md](api-documentation.md)). The individual services no longer
 serve a Swagger UI of their own; set `springdoc.swagger-ui.enabled=true` on one if you
 want it back while debugging against its own port.
+
+The storefront and the staff screens are at **<http://localhost:8088>**. Sign in as the
+bootstrap admin (`admin@smart-delivery.local` / `local-dev-only-admin-password`) to create
+categories, products, warehouses and stock; register a new account to shop. For frontend
+work without rebuilding the image, run the platform and then `npm run dev` in `frontend/`
+(Vite on :5173, proxying to the gateway) -- see [frontend.md](frontend.md).
 
 `scripts/e2e-smoke.sh` drives a complete customer journey against this stack through the
 gateway -- register, stock a product, place an order, follow it to `PAID`, oversell,

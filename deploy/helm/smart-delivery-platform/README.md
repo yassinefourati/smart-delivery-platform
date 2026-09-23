@@ -719,9 +719,13 @@ actuator traffic stops polluting the main context's HTTP metrics.
 
 ## The React frontend
 
-`frontend.enabled` is **false** by default because no image is published for it: CI's
-`docker-build` matrix covers the eight Java services only, and `frontend/` has no
-Dockerfile yet. The Deployment, Service, HPA and PDB are templated and ready.
+`frontend.enabled` is **false** by default, so upgrading an existing release does not
+grow a new workload unasked. The image exists since Phase 21: `frontend/Dockerfile`,
+built, Trivy-scanned and (from `main`) published by CI's `docker-build` matrix as
+`ghcr.io/<repo>/frontend`. It was written to this chart's contract below -- port 8080,
+numeric UID 1000, writes only under `/tmp` so a read-only root filesystem works, and
+the `index.html` history fallback -- and that config was exercised against a local
+nginx (docs/frontend.md), not in a cluster. Set `frontend.enabled=true` to deploy it.
 
 **There is no ConfigMap for this workload, and it needs none.** Worth stating,
 because the obvious design -- mount a `/config.json` the app fetches at boot so that
@@ -742,14 +746,15 @@ what provides it, and the app refuses an absolute origin outright rather than le
 someone reintroduce a cross-origin setup that this platform has no CORS configuration
 for.
 
-**The rest of the contract the chart assumes**, none of which it can check while the
-Dockerfile does not exist:
+**The rest of the contract the chart assumes**, which `frontend/Dockerfile` and
+`frontend/nginx/nginx.conf` were written to meet:
 
 - serves on **containerPort 8080 as UID 1000**, not port 80. The pod drops `ALL`
   capabilities including `NET_BIND_SERVICE`, so a root-nginx image that binds 80 will
-  not start. `nginxinc/nginx-unprivileged` is the usual base;
+  not start. The image sets `USER 1000:1000` and `listen 8080`;
 - runs with a read-only root filesystem, writing only to the `emptyDir` mounts the
-  chart provides at `/tmp`, `/var/cache/nginx` and `/var/run`;
+  chart provides at `/tmp`, `/var/cache/nginx` and `/var/run` (nginx.conf keeps its pid
+  file and every temp path under `/tmp`);
 - serves `index.html` for unknown paths, because a client-side router needs that and
   the Ingress sends every unmatched path here.
 

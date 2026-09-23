@@ -88,6 +88,13 @@ user-initiated cancellation. It backs the "order processing failure rate" dashbo
 panel — the one genuinely business-specific panel, since a healthy JVM with a broken
 saga is the failure mode that matters most here.
 
+**Concurrent idempotent replays (Phase 21).** `order.idempotency.concurrent.replays`
+(`order_idempotency_concurrent_replays_total`) counts create requests that lost the
+unique-index race to a simultaneous request with the same `Idempotency-Key` and were
+answered with the winner's order ([order-flow.md](order-flow.md#idempotency)). A steady
+trickle is double-clicks and client retries being absorbed, which is the key doing its
+job; a jump after a frontend deploy means the client started sending duplicates again.
+
 **Outbox metrics (Phase 15).** Four meters per publishing service (order, inventory,
 payment, delivery — `OutboxMetrics`, one copy in `platform-starter` since Phase 19, see
 [ADR 006](adr/006-outbox-concurrency-and-ordering.md)):

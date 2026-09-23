@@ -19,7 +19,9 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.security.access.AccessDeniedException;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.test.util.ReflectionTestUtils;
+import org.springframework.transaction.PlatformTransactionManager;
 
 import java.math.BigDecimal;
 import java.util.List;
@@ -45,8 +47,15 @@ class OrderServiceTest {
     @Mock
     private OrderEventPublisher eventPublisher;
 
+    private final SimpleMeterRegistry meterRegistry = new SimpleMeterRegistry();
+
     private OrderService service() {
-        return new OrderService(orderRepository, productServiceClient, eventPublisher, new SimpleMeterRegistry());
+        // A mock transaction manager: TransactionTemplate calls straight through, which is all
+        // a unit test of the logic needs. Real transaction behaviour -- including the aborted
+        // transaction a unique violation leaves behind on PostgreSQL -- is covered by
+        // ConcurrentIdempotentCreateIntegrationTest.
+        return new OrderService(orderRepository, productServiceClient, eventPublisher, meterRegistry,
+                org.mockito.Mockito.mock(PlatformTransactionManager.class));
     }
 
     private CreateOrderRequest requestFor(UUID productId, int quantity) {
@@ -122,6 +131,46 @@ class OrderServiceTest {
         assertThat(result).isSameAs(existing);
         verify(productServiceClient, never()).getProduct(any());
         verify(orderRepository, never()).saveAndFlush(any());
+    }
+
+    @Test
+    void aConcurrentDuplicateThatLosesTheInsertRaceIsAnsweredWithTheWinnersOrder() {
+        OrderService service = service();
+        UUID userId = UUID.randomUUID();
+        UUID productId = UUID.randomUUID();
+        var request = requestFor(productId, 1);
+        String key = "double-click-key";
+
+        Order winner = orderWithStatus(userId, OrderStatus.CREATED);
+        ReflectionTestUtils.setField(winner, "idempotencyRequestHash", RequestFingerprint.of(request));
+        // Empty on the in-transaction check (the winner has not committed yet), present on
+        // the re-read after the unique index refused our insert.
+        when(orderRepository.findByUserIdAndIdempotencyKey(userId, key))
+                .thenReturn(Optional.empty())
+                .thenReturn(Optional.of(winner));
+        when(productServiceClient.getProduct(productId))
+                .thenReturn(Optional.of(new ProductSnapshot(productId, "Widget", new BigDecimal("9.99"), true)));
+        when(orderRepository.saveAndFlush(any(Order.class)))
+                .thenThrow(new DataIntegrityViolationException("orders_user_id_idempotency_key_key"));
+
+        Order result = service.create(userId, key, request);
+
+        assertThat(result).isSameAs(winner);
+        verify(eventPublisher, never()).publishOrderCreated(any());
+        assertThat(meterRegistry.counter("order.idempotency.concurrent.replays").count()).isEqualTo(1.0);
+    }
+
+    @Test
+    void aConstraintViolationWithoutAnIdempotencyKeyIsNotMistakenForAReplay() {
+        OrderService service = service();
+        UUID productId = UUID.randomUUID();
+        when(productServiceClient.getProduct(productId))
+                .thenReturn(Optional.of(new ProductSnapshot(productId, "Widget", new BigDecimal("9.99"), true)));
+        when(orderRepository.saveAndFlush(any(Order.class)))
+                .thenThrow(new DataIntegrityViolationException("some other constraint"));
+
+        assertThatThrownBy(() -> service.create(UUID.randomUUID(), null, requestFor(productId, 1)))
+                .isInstanceOf(DataIntegrityViolationException.class);
     }
 
     @Test

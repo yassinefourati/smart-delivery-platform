@@ -126,6 +126,12 @@ and connection budgets that add up across replicas. It has been rendered and val
 but **never applied to a cluster**, because there is no cluster to apply it to. See
 [kubernetes.md](kubernetes.md).
 
+Since Phase 21 the one client is a React SPA (`frontend/`), served by nginx on port 8088
+in Compose. The browser only ever talks to that one origin: nginx serves the bundle and
+proxies `/api` to the gateway, so there is no CORS configuration anywhere
+([ADR 011](adr/011-same-origin-react-spa.md), [frontend.md](frontend.md)). Under
+Kubernetes the Ingress does the same split.
+
 ## Deferred decisions
 
 Documented here so they aren't silently forgotten:

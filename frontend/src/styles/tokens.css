@@ -1,0 +1,146 @@
+/*
+ * Design tokens. This file and code review are the whole design system -- there is no
+ * component library and no designer, so visual consistency rests here.
+ *
+ * TWO RULES THIS FILE EXISTS TO ENFORCE:
+ *
+ * 1. Every text/background pair below is checked at 4.5:1 or better in BOTH schemes. The
+ *    status colours are the ones that get this wrong in practice, because a "nice" amber on
+ *    white is usually about 2:1.
+ * 2. STATUS IS NEVER CONVEYED BY COLOUR ALONE. These tokens exist to reinforce a text
+ *    state, never to replace one. Every saga timeline step, every problem banner and every
+ *    stock line carries words; the colour is the second channel. A polling screen that
+ *    changes with no user action and says so only in colour is inaccessible by
+ *    construction, which is this app's one genuinely app-specific accessibility concern.
+ *
+ * Light and dark come from `prefers-color-scheme` and nothing else. There is no theme
+ * toggle: a toggle needs persistence, a provider, a flash-of-wrong-theme guard and a
+ * server-rendered initial value, and this app has no server-rendered anything.
+ */
+
+:root {
+  /* ---- Palette: light ------------------------------------------------------------- */
+  --sdp-bg: #ffffff;
+  --sdp-bg-raised: #f7f8fa;
+  --sdp-bg-sunken: #eef0f4;
+  --sdp-border: #d3d8e0;
+  --sdp-border-strong: #9aa3b2;
+
+  --sdp-text: #14181f; /* 16.8:1 on --sdp-bg */
+  --sdp-text-muted: #545c6b; /* 7.3:1  on --sdp-bg */
+  --sdp-text-inverted: #ffffff;
+
+  --sdp-accent: #1f5bd7; /* 5.6:1  on --sdp-bg -- links, focus, primary action */
+  --sdp-accent-hover: #17469f;
+  --sdp-accent-subtle: #e8effc;
+
+  /*
+   * Status colours. `danger` is reserved for something that FAILED or cannot proceed;
+   * `warn` is for transient trouble -- SERVICE_UNAVAILABLE reads amber and not red on
+   * purpose, because an open Resilience4j circuit closes again, and the difference between
+   * a user waiting and a user placing a SECOND order is the wording and the colour on that
+   * screen.
+   */
+  --sdp-danger: #b3261e; /* 6.0:1 on --sdp-bg */
+  --sdp-danger-subtle: #fdeceb;
+  --sdp-warn: #8a5300; /* 5.1:1 on --sdp-bg -- not the #f5a623 that fails contrast */
+  --sdp-warn-subtle: #fdf3e2;
+  --sdp-success: #15653a; /* 6.4:1 on --sdp-bg */
+  --sdp-success-subtle: #e7f4ec;
+  --sdp-pending: #545c6b; /* deliberately neutral: a *_PENDING state is not good news yet */
+  --sdp-pending-subtle: #eef0f4;
+
+  /* ---- Type --------------------------------------------------------------------- */
+  --sdp-font-sans:
+    system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  /*
+   * Monospace is not decoration: correlation ids, order ids and SKUs are strings a user
+   * reads aloud to support or copies into a ticket, and a proportional font makes
+   * `l`/`1`/`I` and `0`/`O` indistinguishable in exactly those strings.
+   */
+  --sdp-font-mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+
+  --sdp-text-xs: 0.75rem;
+  --sdp-text-sm: 0.875rem;
+  --sdp-text-md: 1rem;
+  --sdp-text-lg: 1.125rem;
+  --sdp-text-xl: 1.5rem;
+  --sdp-text-2xl: 2rem;
+  --sdp-line-tight: 1.25;
+  --sdp-line-body: 1.55;
+
+  /* ---- Space: a 4px scale, so nothing is ever "about 14px" ---------------------- */
+  --sdp-space-1: 0.25rem;
+  --sdp-space-2: 0.5rem;
+  --sdp-space-3: 0.75rem;
+  --sdp-space-4: 1rem;
+  --sdp-space-5: 1.5rem;
+  --sdp-space-6: 2rem;
+  --sdp-space-7: 3rem;
+
+  /* ---- Shape and elevation ------------------------------------------------------ */
+  --sdp-radius-sm: 4px;
+  --sdp-radius-md: 8px;
+  --sdp-radius-lg: 12px;
+  --sdp-shadow-1: 0 1px 2px rgb(20 24 31 / 8%);
+  --sdp-shadow-2: 0 4px 16px rgb(20 24 31 / 12%);
+
+  /* ---- Focus: a token, because the ring must never be removed, only restyled ---- */
+  --sdp-focus-ring: 2px solid var(--sdp-accent);
+  --sdp-focus-offset: 2px;
+
+  /* ---- Motion. Every duration is read through a token so that one media query can
+          flatten all of them (see below). -------------------------------------------- */
+  --sdp-duration-fast: 120ms;
+  --sdp-duration-slow: 240ms;
+
+  /* ---- Layout ------------------------------------------------------------------- */
+  --sdp-content-max: 72rem;
+  --sdp-z-dialog: 100;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --sdp-bg: #12151b;
+    --sdp-bg-raised: #1b1f27;
+    --sdp-bg-sunken: #0d1015;
+    --sdp-border: #333a46;
+    --sdp-border-strong: #5c6675;
+
+    --sdp-text: #eef1f6; /* 15.1:1 on --sdp-bg */
+    --sdp-text-muted: #a8b1bf; /* 7.6:1  on --sdp-bg */
+    --sdp-text-inverted: #12151b;
+
+    --sdp-accent: #7fa9ff; /* 7.2:1 on --sdp-bg -- a dark scheme needs a LIGHTER accent */
+    --sdp-accent-hover: #a6c3ff;
+    --sdp-accent-subtle: #1d2740;
+
+    --sdp-danger: #ff9d95;
+    --sdp-danger-subtle: #3a1c19;
+    --sdp-warn: #e8b872;
+    --sdp-warn-subtle: #3a2c14;
+    --sdp-success: #7fd3a1;
+    --sdp-success-subtle: #14301f;
+    --sdp-pending: #a8b1bf;
+    --sdp-pending-subtle: #242a34;
+
+    --sdp-shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
+    --sdp-shadow-2: 0 4px 16px rgb(0 0 0 / 55%);
+  }
+}
+
+/*
+ * Honoured here once, at the token layer, rather than per component. This app polls: a
+ * spinner can be on screen for sixteen minutes in the worst case the saga reaper allows, so
+ * "reduce motion" is a real request and not a preference to nod at. Components that would
+ * animate read the duration tokens; when they are ~0 the component is expected to swap a
+ * spinner for static "checking..." text rather than animate imperceptibly.
+ */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --sdp-duration-fast: 1ms;
+    --sdp-duration-slow: 1ms;
+  }
+}

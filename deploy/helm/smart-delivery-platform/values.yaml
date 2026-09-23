@@ -695,10 +695,9 @@ ingress:
 # frontend -- the React SPA
 # -----------------------------------------------------------------------------
 frontend:
-  # OFF by default because there is no published image for it: CI's docker-build
-  # matrix covers the eight Java services only, and frontend/ has no Dockerfile
-  # yet. Everything below is templated and ready; flip this to true once an image
-  # exists.
+  # OFF by default, so an upgrade does not add a workload nobody asked for. The
+  # image is frontend/Dockerfile (Phase 21), built and published by CI's
+  # docker-build matrix; flip this to true to deploy it.
   #
   # THERE IS NO ConfigMap FOR THIS WORKLOAD, AND IT NEEDS NONE. That is worth
   # stating because the obvious design -- mount a /config.json the app fetches at
@@ -718,13 +717,13 @@ frontend:
   # origin outright rather than letting someone reintroduce a cross-origin setup
   # that this platform has no CORS configuration for.
   #
-  # THE REST OF THE CONTRACT THIS CHART EXPECTS OF THE IMAGE, none of which can be
-  # checked here because the Dockerfile does not exist yet:
+  # THE REST OF THE CONTRACT THIS CHART EXPECTS OF THE IMAGE, which
+  # frontend/Dockerfile and frontend/nginx/nginx.conf were written to meet:
   #   - serves on containerPort 8080 as UID 1000, NOT port 80 -- this pod drops ALL
   #     capabilities including NET_BIND_SERVICE, so a root-nginx image that binds 80
-  #     will not start (nginxinc/nginx-unprivileged is the usual base);
+  #     will not start (the image sets USER 1000 and listens on 8080);
   #   - runs with a read-only root filesystem, writing only to the emptyDir mounts
-  #     below;
+  #     below (nginx.conf puts its pid and temp paths under /tmp);
   #   - serves index.html for unknown paths, because a client-side router needs that
   #     and the Ingress sends every unmatched path here.
   #

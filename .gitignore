@@ -31,3 +31,8 @@ Thumbs.db
 
 # Docker
 docker-compose.override.yml
+
+# Frontend
+node_modules/
+frontend/dist/
+frontend/coverage/
