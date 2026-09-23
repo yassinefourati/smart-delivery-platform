@@ -272,8 +272,13 @@ class at `localhost` instead of at a container. All of them passed (twelve class
 Those throwaway copies were scaffolding and are not committed; the committed tests are
 the Testcontainers ones, unchanged. Two differences from CI remain and are worth stating:
 the sandbox ran **PostgreSQL 16 and Kafka 3.9** where the committed tests pin
-`postgres:17-alpine` and `confluentinc/cp-kafka:7.7.1`, and nothing here has exercised
-Testcontainers' own container lifecycle. Everything the tests actually assert — schema,
+`postgres:17-alpine` and `apache/kafka:3.9.1`, and nothing here has exercised
+Testcontainers' own container lifecycle. That gap was real: until Phase 21's CI run, every
+Kafka-backed class declared `org.testcontainers.kafka.KafkaContainer` with the
+`confluentinc/cp-kafka` image, which that class refuses before starting anything (it
+accepts only `apache/kafka`), so all eleven failed in CI at class initialisation while
+passing here against a local broker. They now use `apache/kafka:3.9.1`, matching the
+Kafka 3.9 client the services use. Everything the tests actually assert — schema,
 migrations, SQL, locking, consumer groups, retries, dead-lettering, the saga end to end —
 has now genuinely run.
 

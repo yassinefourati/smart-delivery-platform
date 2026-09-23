@@ -58,7 +58,7 @@ class OutboxCleanupIntegrationTest {
 
     /** Not used by these tests; the application context will not start without it. */
     @Container
-    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.7.1"));
+    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("apache/kafka:3.9.1"));
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
