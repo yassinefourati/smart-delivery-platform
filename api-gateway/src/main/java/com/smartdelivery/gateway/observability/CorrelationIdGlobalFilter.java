@@ -56,7 +56,20 @@ public class CorrelationIdGlobalFilter implements GlobalFilter, Ordered {
         ServerHttpRequest mutatedRequest = request.mutate()
                 .header(HEADER_NAME, correlationId)
                 .build();
-        exchange.getResponse().getHeaders().set(HEADER_NAME, correlationId);
+
+        // Set on beforeCommit, not here. Setting it now runs BEFORE the routing filter
+        // copies the downstream response's headers in -- and every backend service sets
+        // this header too, so the backend's copy was appended to ours and the client
+        // received the id twice. A browser reading it back got "<id>, <id>" from a single
+        // Headers.get(), because the Fetch spec joins duplicate field values with a comma.
+        // Found while building the frontend (Phase 21): the values were always identical,
+        // so nothing server-side ever noticed. beforeCommit runs after the merge and
+        // before the response is written, so set() replaces rather than appends.
+        String id = correlationId;
+        exchange.getResponse().beforeCommit(() -> {
+            exchange.getResponse().getHeaders().set(HEADER_NAME, id);
+            return Mono.empty();
+        });
 
         return chain.filter(exchange.mutate().request(mutatedRequest).build());
     }

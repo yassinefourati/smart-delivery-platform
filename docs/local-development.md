@@ -27,6 +27,7 @@ Starts, on one Docker network (`smart-delivery-net`):
 | `sdp-payment-service` | | 8085 |
 | `sdp-delivery-service` | | 8086 |
 | `sdp-notification-service` | | 8087 |
+| `sdp-web` | The React SPA behind nginx; proxies `/api` to the gateway -- **open this one** | 8088 |
 | `sdp-prometheus` | Metrics, scraping every service's `/actuator/prometheus` | 9090 |
 | `sdp-tempo` | Distributed tracing backend (OTLP ingest + query) | 3200, 4318 |
 | `sdp-grafana` | Dashboards, provisioned Prometheus + Tempo datasources | 3000 |
@@ -39,6 +40,36 @@ overall status with:
 docker compose ps
 curl http://localhost:8080/actuator/health
 ```
+
+Once the stack is up, every service's API is browsable from one page:
+**<http://localhost:8080/swagger-ui.html>**, with a dropdown to switch between services
+(see [api-documentation.md](api-documentation.md)). The individual services no longer
+serve a Swagger UI of their own; set `springdoc.swagger-ui.enabled=true` on one if you
+want it back while debugging against its own port.
+
+The storefront and the staff screens are at **<http://localhost:8088>**. Sign in as the
+bootstrap admin (`admin@smart-delivery.local` / `local-dev-only-admin-password`) to create
+categories, products, warehouses and stock; register a new account to shop. For frontend
+work without rebuilding the image, run the platform and then `npm run dev` in `frontend/`
+(Vite on :5173, proxying to the gateway) -- see [frontend.md](frontend.md).
+
+An empty platform has nothing to browse. `scripts/seed-demo-data.sh` fills it through the
+gateway: 5 categories, 20 products, 2 warehouses with stock chosen to show every stock
+state (plenty, "only N left", out of stock), 3 customers with addresses, and one order
+each, which the saga takes to "waiting for a courier" on its own. It is safe to re-run --
+it skips what exists, and the orders carry a fixed `Idempotency-Key`, so a second run
+replays them rather than placing more. `SEED_ORDERS=0` skips the orders; the customers
+sign in with `demo-password-123`. It creates no delivery agents, because no endpoint can
+grant the `DELIVERY_AGENT` role.
+
+```bash
+docker compose up -d --build && scripts/seed-demo-data.sh
+```
+
+`scripts/e2e-smoke.sh` drives a complete customer journey against this stack through the
+gateway -- register, stock a product, place an order, follow it to `PAID`, oversell,
+cancel and refund. `SKIP_BUILD=1` reuses already-built images and `KEEP_STACK=1` leaves
+the stack up afterwards.
 
 Tear down with `docker compose down` (add `-v` to also drop the Postgres/Redis data
 volumes).

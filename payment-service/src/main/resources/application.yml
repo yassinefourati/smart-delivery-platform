@@ -1,6 +1,18 @@
 spring:
   application:
     name: payment-service
+  # Kubernetes readiness (Phase 20). Each setting states its reason in a line; the
+  # full argument is docs/kubernetes.md and docs/adr/010-probe-and-lifecycle-contract.md.
+  lifecycle:
+    # Bounds EACH shutdown phase, not the total. The pod's terminationGracePeriodSeconds
+    # must cover preStop + 2 x this, and the Helm chart refuses to render if it does not.
+    timeout-per-shutdown-phase: ${SHUTDOWN_PHASE_TIMEOUT:20s}
+  task:
+    scheduling:
+      pool:
+        # One thread per @Scheduled job. At the default of 1, a slow outbox batch starved the
+        # cleanup job entirely -- docs/kubernetes.md.
+        size: ${SCHEDULER_POOL_SIZE:2}
   security:
     oauth2:
       resourceserver:
@@ -19,6 +31,12 @@ spring:
     url: ${DB_URL:jdbc:postgresql://localhost:5432/payment_db}
     username: ${DB_USERNAME:sdp}
     password: ${DB_PASSWORD:sdp_local_dev_only}
+    # Both Hikari defaults are wrong for a pod. A 30s connection-timeout parks the same
+    # request threads that serve the probes -- a restart storm even with db out of the
+    # probe groups -- and 10 x 6 services x 2 replicas exceeds Postgres's 100 connections.
+    hikari:
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:2000}
+      maximum-pool-size: ${DB_POOL_MAX:5}
   jpa:
     hibernate:
       ddl-auto: validate
@@ -30,6 +48,13 @@ spring:
   flyway:
     enabled: true
     locations: classpath:db/migration
+    # Kubernetes has no depends_on, so a pod scheduled before Postgres is up would
+    # crash-loop. The interval must be set with the count: Boot's default is 120s.
+    connect-retries: ${FLYWAY_CONNECT_RETRIES:10}
+    connect-retries-interval: ${FLYWAY_CONNECT_RETRIES_INTERVAL:5s}
+    # Flyway's own default, stated because it is a cliff: replicas waiting on another's
+    # migration give up after ~50s. Raise it before any migration that could run longer.
+    lock-retry-count: ${FLYWAY_LOCK_RETRY_COUNT:50}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:9092}
     # Plain JSON strings, not Java-type-headered objects -- see docs/kafka-events.md
@@ -41,6 +66,8 @@ spring:
 
 server:
   port: 8085
+  # Boot 3.5's default already; stated because the grace-period arithmetic depends on it.
+  shutdown: graceful
 
 management:
   endpoints:
@@ -50,6 +77,19 @@ management:
   endpoint:
     health:
       show-details: when-authorized
+      # Two probe groups for the kubelet, with no shared dependency in either (ADR 010).
+      # /actuator/health is unchanged and still aggregates db, Kafka and Redis.
+      probes:
+        enabled: true
+      group:
+        # Liveness: is this JVM wedged? Never Postgres, Kafka or Redis -- a shared outage
+        # must not restart every replica at once.
+        liveness:
+          include: livenessState
+        # Readiness: can this instance take traffic? Shared dependencies are deliberately
+        # excluded; ADR 010 records which failure that choice accepts.
+        readiness:
+          include: readinessState
   metrics:
     distribution:
       percentiles-histogram:
@@ -96,9 +136,27 @@ outbox:
   cleanup-batch-size: ${OUTBOX_CLEANUP_BATCH_SIZE:500}
   cleanup-max-batches-per-run: ${OUTBOX_CLEANUP_MAX_BATCHES_PER_RUN:20}
 
+# This service still generates and serves its own OpenAPI document at /v3/api-docs --
+# that is what api-gateway proxies and aggregates. What it no longer serves is a Swagger
+# UI of its own: there is one UI for the whole platform, at the gateway, with a dropdown
+# to switch between services (docs/api-documentation.md). Six near-identical UIs on six
+# ports, each documenting an API you are not supposed to call directly, was six chances
+# to read a stale one. Set springdoc.swagger-ui.enabled=true to get it back for local
+# debugging against this service's own port.
 springdoc:
   swagger-ui:
-    path: /swagger-ui.html
+    enabled: false
+
+# Metadata springdoc cannot infer, bound by platform-starter (ADR 009). public-url is the
+# one that matters: it is what Swagger UI's "Try it out" calls, and it has to be the
+# gateway -- a document served through the gateway would otherwise advertise this
+# service's internal hostname, which resolves to nothing in a browser.
+platform:
+  openapi:
+    title: Payment Service API
+    description: Mock payment processing
+    version: v1
+    public-url: ${PUBLIC_GATEWAY_URL:http://localhost:8080}
 
 # correlationId (see CorrelationIdFilter) on every log line -- docs/observability.md.
 logging:

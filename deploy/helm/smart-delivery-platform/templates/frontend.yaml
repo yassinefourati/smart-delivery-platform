@@ -1,0 +1,217 @@
+{{/*
+================================================================================
+The React SPA: Deployment, Service, and optionally an HPA and a PDB.
+
+OFF BY DEFAULT so an upgrade does not add a workload unasked. The image is
+frontend/Dockerfile (Phase 21), built and published by CI's docker-build matrix.
+
+NO ConfigMap, AND IT NEEDS NONE. The obvious design -- mount a /config.json the app
+fetches at boot so one image serves every environment -- is what this template
+originally carried, and the app that got built does something better: src/config.ts
+reads a BUILD-time VITE_API_BASE_PATH that is '' in every environment it ships,
+asserts at module load that the value is a RELATIVE path (rejecting an absolute
+origin outright), and src/lib/api/http.ts -- the only fetch in the app -- builds
+every URL from it. So the bundle carries no origin, no hostname and nothing
+environment-specific, the same artifact is correct everywhere, and there is nothing
+for a ConfigMap to hold. Mounting one would be dead weight the app never reads.
+
+The chart is what pays for that: the SPA MUST be served from the same origin as the
+API, because relative URLs have no other meaning. ingress.host is what guarantees it.
+
+THE REST OF THE CONTRACT, which frontend/Dockerfile and frontend/nginx/nginx.conf
+were written to meet:
+  - serves on containerPort 8080 as UID 1000, NOT port 80. This pod drops ALL
+    capabilities including NET_BIND_SERVICE, so a root-nginx image that binds 80
+    will not start (the image sets USER 1000 and listens on 8080);
+  - runs with a read-only root filesystem, writing only to the emptyDir mounts below
+    (nginx.conf keeps its pid file and temp paths under /tmp);
+  - serves index.html for unknown paths, because a client-side router needs that and
+    the Ingress sends every unmatched path here.
+
+AND THE RULE WITH NO EXCEPTIONS: this workload gets NO Secret, ever. A browser bundle
+has no confidentiality -- anything the page can read, so can the person reading it --
+so ORDER_SERVICE_CLIENT_SECRET (which would let any visitor mint SERVICE-role tokens)
+and BOOTSTRAP_ADMIN_PASSWORD must never be within reach of it. There is deliberately
+no secretEnv field for the frontend anywhere in values.yaml.
+
+ONE PRODUCT CONSEQUENCE WORTH STATING BEFORE SOMEBODY TRIES TO SOLVE IT IN REACT:
+this app inherits an authentication design with no refresh tokens and no revocation,
+both recorded as out of scope in docs/security.md. A one-hour access token in the
+browser, unrenewable, means the user is logged out mid-session with no way to extend
+it, and a logout cannot actually invalidate anything. That is a backend decision
+surfacing in the UI, not a frontend bug, and the fix is a refresh endpoint that does
+not exist yet.
+================================================================================
+*/}}
+{{- if .Values.frontend.enabled }}
+{{- $root := . }}
+{{- $f := .Values.frontend }}
+{{- $name := $f.name }}
+{{- $fullName := include "sdp.name" (dict "root" $root "name" $name) }}
+{{- $tag := $f.image.tag | default $root.Values.image.tag | default $root.Chart.AppVersion }}
+{{/* So the app.kubernetes.io/version label reports the FRONTEND's tag rather than
+     the Java services' default -- the two are built and tagged independently. */}}
+{{- $labelSvc := dict "image" (dict "tag" $tag) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 4 }}
+spec:
+{{- if not $f.autoscaling.enabled }}
+  replicas: {{ $f.replicaCount }}
+{{- end }}
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      {{- include "sdp.selectorLabels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        app: {{ $fullName }}
+        {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 8 }}
+        {{- with $root.Values.pod.extraLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with $root.Values.pod.extraAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      # No checksum annotation, because this workload has no ConfigMap and no Secret
+      # to checksum -- there is nothing a rollout has to be triggered by except a new
+      # image tag, which changes the pod spec by itself.
+      # No sdp.metrics/scrape label, on the pod or the Service below: nginx has no
+      # /actuator, and labelling it would put a permanently-down target on the
+      # dashboard. This is exactly the case that opt-in label exists for.
+    spec:
+      automountServiceAccountToken: false
+      {{- with $root.Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml $root.Values.pod.securityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ $f.terminationGracePeriodSeconds }}
+      volumes:
+        {{- range $v := $f.writableVolumes }}
+        - name: {{ $v.name }}
+          emptyDir:
+            sizeLimit: {{ $v.sizeLimit }}
+        {{- end }}
+      containers:
+        - name: {{ $name }}
+          image: {{ printf "%s/%s/%s:%s" $f.image.registry $f.image.repository $f.image.name $tag | quote }}
+          imagePullPolicy: {{ $f.image.pullPolicy }}
+          securityContext:
+            {{- toYaml $root.Values.pod.containerSecurityContext | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: {{ $f.containerPort }}
+              protocol: TCP
+          volumeMounts:
+            # Only the writable scratch directories nginx needs under a read-only
+            # root filesystem. Nothing is mounted into the web root: the bundle is
+            # self-contained, which is the point of the build-time relative base path.
+            {{- range $v := $f.writableVolumes }}
+            - name: {{ $v.name }}
+              mountPath: {{ $v.mountPath }}
+            {{- end }}
+          # A static file server starts in milliseconds and has no dependency to
+          # wait on, so there is no startupProbe and no argument to have about what
+          # belongs in which probe group. This is the one workload in the platform
+          # where the naive recipe is the right one.
+          readinessProbe:
+            httpGet:
+              path: {{ $f.probePath }}
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: {{ $f.probePath }}
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 6
+            terminationGracePeriodSeconds: 10
+          lifecycle:
+            preStop:
+              # Same endpoint-propagation race as the Java services: the pod stops
+              # accepting immediately, and kube-proxy takes an unbounded moment to
+              # notice. A page load that lands in that window fails visibly in the
+              # browser.
+              {{- if $root.Values.lifecycle.preStopUseNativeSleep }}
+              sleep:
+                seconds: {{ $f.preStopSleepSeconds }}
+              {{- else }}
+              exec:
+                command: ["sh", "-c", "sleep {{ $f.preStopSleepSeconds }}"]
+              {{- end }}
+          resources:
+            {{- toYaml $f.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 4 }}
+spec:
+  type: {{ $f.service.type }}
+  selector:
+    {{- include "sdp.selectorLabels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $f.service.port }}
+      targetPort: http
+      protocol: TCP
+{{- if $f.autoscaling.enabled }}
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 4 }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ $fullName }}
+  minReplicas: {{ $f.autoscaling.minReplicas }}
+  maxReplicas: {{ $f.autoscaling.maxReplicas }}
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: {{ $f.autoscaling.targetCPUUtilizationPercentage }}
+{{- end }}
+{{- $floor := ternary (int $f.autoscaling.minReplicas) (int $f.replicaCount) $f.autoscaling.enabled }}
+{{- if and $f.podDisruptionBudget.enabled (gt $floor 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 4 }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      {{- include "sdp.selectorLabels" (dict "root" $root "name" $name "svc" $labelSvc) | nindent 6 }}
+{{- end }}
+{{- end }}

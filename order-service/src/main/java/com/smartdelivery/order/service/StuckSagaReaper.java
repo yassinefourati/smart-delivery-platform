@@ -94,7 +94,11 @@ public class StuckSagaReaper {
                 .register(meterRegistry);
     }
 
-    @Scheduled(fixedDelayString = "${saga.reaper-interval-ms:60000}")
+    // Initial delay defaults to 0 (reap at startup, as before). It exists so a test can park
+    // the application's own reaper completely: a long interval alone still lets the first
+    // run fire at startup and race the test's own rows.
+    @Scheduled(fixedDelayString = "${saga.reaper-interval-ms:60000}",
+            initialDelayString = "${saga.reaper-initial-delay-ms:0}")
     public void reapStuckSagas() {
         List<ClaimedSaga> claimed = claimBatch();
         for (ClaimedSaga saga : claimed) {

@@ -2,7 +2,8 @@
 
 ## Strategy
 
-Two layers, consistently across all 8 services:
+Two layers, consistently across all 8 services (and `platform-starter`, the shared
+infrastructure module added in Phase 19):
 
 - **Unit tests** — service/domain logic with Mockito-mocked collaborators. Fast, no
   infrastructure, run everywhere including this sandbox.
@@ -38,7 +39,7 @@ phase's job was to audit that coverage for gaps and close the one real one: api-
 | user-service | `AuthServiceTest`, `UserServiceTest`, `JwtServiceTest` (RS256 signing, `kid`, claims, round-tripped through a real `JwtDecoder`), `JwtKeyProviderTest` (key loading, rotation, no private material in the JWKS), `ServiceTokenServiceTest` | `UserApiIntegrationTest` (Postgres — now also the JWKS endpoint, the client-credentials grant, and an old-HMAC token being rejected) |
 | product-service | `ProductServiceTest`, `CategoryServiceTest` | `ProductApiIntegrationTest` (Postgres) |
 | inventory-service | reservation/warehouse/admin service tests, `InventoryTest` (domain) | `InventoryApiIntegrationTest` (Postgres) — includes a genuine concurrency test: two reservation requests for the last unit of stock fired from separate threads at a `CyclicBarrier`, asserting exactly one wins and the other sees a real conflict, not a mocked one |
-| order-service | `OrderServiceTest`, `OrderSagaOrchestratorTest`, `OrderSagaEventHandlerTest`, `RequestFingerprintTest`, `OrderStatusTest`, publisher/outbox tests, `ServiceTokenProviderTest` (client-credentials caching), `OrderCancellationListenerTest`, `StuckSagaReaperTest` | `OrderApiIntegrationTest` (Postgres), `OrderKafkaIntegrationTest` (Postgres+Kafka), `OrderSagaIntegrationTest` (Postgres+Kafka — the whole Order→Inventory→Payment saga end to end over a real broker, with `MockRestServiceServer` standing in for the two downstream services so order-service stays independently testable), `ResilienceIntegrationTest` (no Testcontainers — a narrow Spring context slice, see [resilience.md](resilience.md)), `JwtResourceServerIntegrationTest` (no Testcontainers either — the platform-wide token-acceptance contract, see below), `OrderCancellationCompensationIntegrationTest` and `StuckSagaReaperIntegrationTest` (Postgres+Kafka — cancellation compensation retried off the event, and the reaper's claim/lease/abandon behaviour including two instances racing; see [ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)), `OutboxEventRepositoryIntegrationTest` (Postgres, a `@DataJpaTest` slice — the table's own contract: database-assigned `sequence_no`, the oldest-per-aggregate claim query, the retention delete), `OutboxConcurrencyIntegrationTest` and `OutboxCleanupIntegrationTest` (Postgres+Kafka — two publishers racing one table, a failed send holding back its aggregate's stream, backoff, and concurrent retention runs; see [ADR 006](adr/006-outbox-concurrency-and-ordering.md)) |
+| order-service | `OrderServiceTest`, `OrderSagaOrchestratorTest`, `OrderSagaEventHandlerTest`, `RequestFingerprintTest`, `OrderStatusTest`, publisher/outbox tests, `ServiceTokenProviderTest` (client-credentials caching), `OrderCancellationListenerTest`, `StuckSagaReaperTest` | `OrderApiIntegrationTest` (Postgres), `OrderKafkaIntegrationTest` (Postgres+Kafka), `OrderSagaIntegrationTest` (Postgres+Kafka — the whole Order→Inventory→Payment saga end to end over a real broker, with `MockRestServiceServer` standing in for the two downstream services so order-service stays independently testable), `ResilienceIntegrationTest` (no Testcontainers — a narrow Spring context slice, see [resilience.md](resilience.md)), `JwtResourceServerIntegrationTest` (no Testcontainers either — the platform-wide token-acceptance contract, see below), `OrderCancellationCompensationIntegrationTest` and `StuckSagaReaperIntegrationTest` (Postgres+Kafka — cancellation compensation retried off the event, and the reaper's claim/lease/abandon behaviour including two instances racing; see [ADR 008](adr/008-reliable-compensation-and-stuck-saga-reaper.md)), `OutboxEventRepositoryIntegrationTest` (Postgres, a `@DataJpaTest` slice — the table's own contract: database-assigned `sequence_no`, the oldest-per-aggregate claim query, the retention delete), `OutboxConcurrencyIntegrationTest` and `OutboxCleanupIntegrationTest` (Postgres+Kafka — two publishers racing one table, a failed send holding back its aggregate's stream, backoff, and concurrent retention runs; see [ADR 006](adr/006-outbox-concurrency-and-ordering.md)), `ConcurrentIdempotentCreateIntegrationTest` (Postgres+Kafka, Phase 21 — two same-key creates forced through the existence check together by a barrier, asserting one order, one `OrderCreated`, and both callers answered with it; see [order-flow.md](order-flow.md#idempotency)) |
 | payment-service | `MockPaymentProviderTest`, `PaymentServiceTest`, publisher/outbox tests | `PaymentApiIntegrationTest` (Postgres) |
 | delivery-service | `DeliveryServiceTest`, `ShipmentServiceTest`, `DeliveryAgentServiceTest`, publisher/outbox/listener tests | `DeliveryApiIntegrationTest` (Postgres) |
 | notification-service | `NotificationEventListenerTest` | `NotificationEventListenerIntegrationTest` (Kafka only — no database, see [service-boundaries.md](service-boundaries.md)) |
@@ -77,14 +78,28 @@ Because it needs no Postgres/Kafka container, this is one of only two integratio
 tests in the whole platform (`ResilienceIntegrationTest` is the other) that actually
 runs to completion in this sandbox — see the Docker caveat below.
 
+## platform-starter's tests (Phase 19)
+
+The shared infrastructure module ([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md))
+carries the tests that used to be duplicated alongside the code, plus new ones for the
+things only a shared module can get wrong:
+
+| Test | What it pins |
+|---|---|
+| `OutboxEventTest`, `OutboxPublisherTest`, `OutboxCleanupJobTest` | Moved here from order-service; the other three services' identical copies were deleted. The domain literals ("Order", `ORDER_CREATED`) became generic, since the poller never reads them. |
+| `ApiErrorsTest` | **The compatibility guarantee, as a test rather than a promise**: the RFC 7807 body is a strict superset of the `ErrorResponse` record it replaced. If someone later "tidies up" by dropping the duplicated extension properties in favour of RFC 7807's own members, this fails -- which is the point, because that is a breaking change for every existing client. |
+| `PlatformExceptionHandlerTest` | The shared mappings, driven through a real MVC dispatch rather than by calling the handler methods. Most of these exceptions are thrown by Spring during argument binding, so invoking the methods directly would prove the mapping exists without proving anything reaches it. Includes the three cases that used to be 500s, and the subclass-wins-over-catch-all extension point every service relies on. |
+| `PlatformAutoConfigurationTest` | The **conditions**, not the classes. Everything the starter contributes arrives through an auto-configuration, so "is it wired where it should be and absent where it should not be" is a different question from "does the class work" -- and it is the one that decides whether adding this dependency to a service is safe. It asserts the correlation filter is absent outside a servlet application (api-gateway is reactive), that the outbox appears only with both a Kafka client and a persistence unit, that `platform.outbox.enabled=false` switches it off, and that a service can replace any bean with its own. |
+
 ## Where the outbox's container-backed tests live (Phase 15)
 
 `OutboxEvent`, `OutboxEventRepository`, `OutboxPublisher`, `OutboxCleanupJob`,
-`OutboxProperties`, and `OutboxMetrics` are byte-for-byte identical in order-,
+`OutboxProperties`, and `OutboxMetrics` used to be byte-for-byte identical in order-,
 inventory-, payment-, and delivery-service apart from their package declaration
-([ADR 006](adr/006-outbox-concurrency-and-ordering.md)). All four carry the full unit
-test suite (`OutboxPublisherTest`, `OutboxEventTest`, `OutboxCleanupJobTest`); only
-order-service carries the three container-backed ones.
+([ADR 006](adr/006-outbox-concurrency-and-ordering.md)). Phase 19 moved all seven into
+`platform-starter` and deleted the copies, so the unit suite (`OutboxPublisherTest`,
+`OutboxEventTest`, `OutboxCleanupJobTest`) now exists once, there. Only order-service
+carries the three container-backed ones.
 
 That is deliberate. Running four copies of "two publishers race one table" costs four
 Postgres and Kafka containers per CI run to prove the same code four times. What *is*
@@ -169,7 +184,8 @@ classes:
 | `controllersDoNotTouchRepositoriesDirectly` | Transaction boundaries and business rules live in the service layer; a controller reaching past it is how they stop being applied. |
 | `domainDoesNotDependOnTheWebLayer` | Dependencies point inwards. A DTO or a `@RestController` changing must not be able to ripple into the domain model. |
 | `businessCodeDoesNotPublishToKafkaDirectly` | The outbox ([ADR 004](adr/004-outbox-pattern.md)) only works if *nothing* writes to Kafka outside it. A service class holding a `KafkaTemplate` is precisely the dual-write the outbox exists to eliminate. |
-| `onlyTheEventAndConfigPackagesTouchKafka` | The same rule from the other direction, stated as an allowlist so a new package can't quietly acquire a `KafkaTemplate`. `config` is allowed because `KafkaConsumerConfig` has to hand one to `DeadLetterPublishingRecoverer`. |
+| `onlyTheEventAndConfigPackagesTouchKafka` | The same rule from the other direction, stated as an allowlist so a new package can't quietly acquire a Kafka dependency. `config` is allowed because `KafkaConsumerConfig` has to hand a `KafkaTemplate` to `DeadLetterPublishingRecoverer`. |
+| `nothingOutsideTheDeadLetterWiringHoldsAKafkaTemplate` (Phase 19) | Sharper than the two above, and only possible once the outbox poller moved to `platform-starter`: *nothing* in a service holds a `KafkaTemplate` now, not even the `event` package, which writes rows. Stated as its own rule rather than by tightening the others, because the three fail for different reasons and the message matters when one does. |
 
 **notification-service gets different rules on purpose.** It has no web, domain,
 repository, or service packages at all — it is a pure consumer
@@ -208,6 +224,19 @@ have run at all. It is also a good illustration of why the smoke test is worth i
 complexity — a test suite that never starts the artifact it ships cannot tell you the
 artifact doesn't start.
 
+## Frontend tests (Phase 21)
+
+`frontend/` has its own suite -- Vitest, React Testing Library and MSW, run by CI's
+`frontend` job with 80% coverage floors on `lib/api`, `domain` and `lib/cart`. The
+responses MSW serves were captured from the running gateway, not written by hand. The
+tests that carry the most weight render the real route tree, guards and lazy pages and
+assert what the user sees and what the server receives:
+`features/checkout/__tests__/idempotencyKey.test.tsx` records the `Idempotency-Key` of every
+POST across a double-click, a same-frame double-click, a 503 retry, a network-failure
+retry, a remount, and a 401 followed by re-login, and asserts one key; the order page's
+tests cover the cancel race and the exact FAILED copy. [frontend.md](frontend.md) lists
+what was verified beyond them, including a browser walk-through against the live stack.
+
 ## Docker / Testcontainers caveat
 
 This platform was built in a sandbox with no Docker available (confirmed repeatedly
@@ -220,7 +249,7 @@ can be run directly: PostgreSQL 16, Redis 7.0, and a single-node Kafka 3.9 broke
 were installed and started in the sandbox, and **every** `*IntegrationTest` in the
 platform was executed against them — one class at a time, each against a freshly
 formatted broker and a freshly created database, by pointing a throwaway copy of the
-class at `localhost` instead of at a container. All of them passed (twelve classes at the time; two more were added in Phase 17 and run the same way):
+class at `localhost` instead of at a container. All of them passed (twelve classes at the time; two more were added in Phase 17 and one in Phase 21, run the same way):
 
 | Test class | Tests |
 |---|---|
@@ -237,13 +266,19 @@ class at `localhost` instead of at a container. All of them passed (twelve class
 | `OutboxConcurrencyIntegrationTest` | 3 |
 | `OutboxCleanupIntegrationTest` | 3 |
 | `OutboxEventRepositoryIntegrationTest` | 6 |
+| `ConcurrentIdempotentCreateIntegrationTest` | 1 |
 | `NotificationEventListenerIntegrationTest` | 3 |
 
 Those throwaway copies were scaffolding and are not committed; the committed tests are
 the Testcontainers ones, unchanged. Two differences from CI remain and are worth stating:
 the sandbox ran **PostgreSQL 16 and Kafka 3.9** where the committed tests pin
-`postgres:17-alpine` and `confluentinc/cp-kafka:7.7.1`, and nothing here has exercised
-Testcontainers' own container lifecycle. Everything the tests actually assert — schema,
+`postgres:17-alpine` and `apache/kafka:3.9.1`, and nothing here has exercised
+Testcontainers' own container lifecycle. That gap was real: until Phase 21's CI run, every
+Kafka-backed class declared `org.testcontainers.kafka.KafkaContainer` with the
+`confluentinc/cp-kafka` image, which that class refuses before starting anything (it
+accepts only `apache/kafka`), so all eleven failed in CI at class initialisation while
+passing here against a local broker. They now use `apache/kafka:3.9.1`, matching the
+Kafka 3.9 client the services use. Everything the tests actually assert — schema,
 migrations, SQL, locking, consumer groups, retries, dead-lettering, the saga end to end —
 has now genuinely run.
 

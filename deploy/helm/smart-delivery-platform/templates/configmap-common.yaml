@@ -1,0 +1,98 @@
+{{/*
+================================================================================
+sdp-common -- the values that must be byte-identical in all eight services.
+Consumed with envFrom by every Deployment.
+
+Why one shared map rather than eight copies: JWT_ISSUER and JWT_AUDIENCE are
+minted by user-service and validated as claims by six resource servers, so one
+character of drift between two copies is a 401 on every request with nothing in
+either log that says "mismatch". JWT_JWK_SET_URI, KAFKA_BOOTSTRAP_SERVERS,
+OTLP_TRACING_ENDPOINT, PUBLIC_GATEWAY_URL and the six *_SERVICE_URI values have
+the same shape. This is ADR 009's argument for platform-starter applied to
+configuration: shared infrastructure where divergence is a bug, not a design
+choice.
+
+The accepted cost: envFrom injects values a pod does not read -- api-gateway gets
+KAFKA_BOOTSTRAP_SERVERS, notification-service gets six service URIs. Harmless,
+because Spring binds only what its own application.yml references, but it does
+make `kubectl exec -- env` noisier than docker-compose.yml's per-service
+environment blocks were.
+
+A ConfigMap consumed as env vars is injected at POD CREATION ONLY. Editing this
+object changes nothing in a running pod -- unlike a mounted volume it never
+updates in place -- and Spring Boot binds configuration once at startup anyway,
+with no Spring Cloud Kubernetes refresh here. So in this platform EVERY
+configuration change is a rollout, which is what the checksum annotation on each
+Deployment makes automatic instead of dependent on somebody remembering
+`kubectl rollout restart`.
+================================================================================
+*/}}
+{{- $root := . }}
+{{- $overrides := default (dict) .Values.common.serviceUriOverrides }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "sdp.configName" (dict "root" $root "name" "common") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" "common") | nindent 4 }}
+data:
+  # Both profile names, on purpose. The last `---` document in all eight
+  # application.yml files is what turns on ECS JSON logging, and its activation is
+  # the profile expression "docker | kubernetes" -- so activating both means the
+  # JSON logging docs/observability.md depends on is on whether or not that
+  # widening has landed in a given build, and stays on if a `kubernetes`-only
+  # document is added later. The failure this avoids is the quiet one: one wrong
+  # profile name does not error, it silently reverts to plain text.
+  SPRING_PROFILES_ACTIVE: {{ .Values.common.springProfiles | quote }}
+  # FQDN, not a bare name. A bare `otel-collector` resolves only inside the pod's
+  # own namespace, so from this namespace it resolves to nothing: the OTLP
+  # exporter logs and drops, the services keep serving, and the trace backend is
+  # simply empty with nothing to explain it.
+  OTLP_TRACING_ENDPOINT: {{ .Values.common.otlpTracingEndpoint | quote }}
+  KAFKA_BOOTSTRAP_SERVERS: {{ .Values.common.kafkaBootstrapServers | quote }}
+  # Identifiers, not URLs anything resolves. Validated as the `iss` and `aud`
+  # claims by every resource server.
+  JWT_ISSUER: {{ .Values.common.jwtIssuer | quote }}
+  JWT_AUDIENCE: {{ .Values.common.jwtAudience | quote }}
+  # What Swagger UI's "Try it out" calls. Must be the public Ingress host, and the
+  # same host the SPA is served from -- there is no CORS configuration anywhere in
+  # this repository.
+  PUBLIC_GATEWAY_URL: {{ .Values.common.publicGatewayUrl | quote }}
+{{- if hasKey $overrides "JWT_JWK_SET_URI" }}
+  JWT_JWK_SET_URI: {{ get $overrides "JWT_JWK_SET_URI" | quote }}
+{{- else }}
+{{- $us := index .Values.services "user-service" }}
+{{- if not (and $us $us.enabled) }}
+{{- fail "user-service is disabled and common.serviceUriOverrides.JWT_JWK_SET_URI is not set, so the six resource servers would fall back to application.yml's localhost default and reject every token. Point JWT_JWK_SET_URI at whatever issues tokens, or leave user-service enabled." }}
+{{- end }}
+  # The Service, not a pod. That is only safe because JWT_PRIVATE_KEY comes from
+  # ONE Secret shared by every user-service replica, so any replica serves a
+  # byte-identical JWKS -- which is the whole property
+  # secrets.jwtSigningKeyProvisioned exists to assert.
+  JWT_JWK_SET_URI: {{ printf "%s/.well-known/jwks.json" (include "sdp.serviceUrl" (dict "root" $root "name" "user-service" "port" $us.port)) | quote }}
+{{- end }}
+  # Kubernetes Services replace Compose DNS names, and these are GENERATED from
+  # the Services this chart creates rather than listed, so they cannot drift from
+  # the objects they name and they follow naming.prefix automatically. This is the
+  # service-discovery question docs/architecture.md left open, answered the way
+  # that document predicted -- "moving to Kubernetes Services, which give this for
+  # free". No Eureka, no Consul, and the env var names are exactly the ones
+  # already in the application.yml files.
+  #
+  # api-gateway and notification-service get no *_SERVICE_URI: nothing calls
+  # either of them from inside the platform. The gateway is called from the
+  # Ingress, and notification-service is a pure Kafka consumer.
+{{- range $name, $svc := .Values.services }}
+{{- if and $svc.enabled (ne $name "api-gateway") (ne $name "notification-service") }}
+{{- $key := printf "%s_URI" ($name | upper | replace "-" "_") }}
+{{- if hasKey $overrides $key }}
+  {{ $key }}: {{ get $overrides $key | quote }}
+{{- else }}
+  {{ $key }}: {{ include "sdp.serviceUrl" (dict "root" $root "name" $name "port" $svc.port) | quote }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- range $key, $value := default (dict) .Values.common.extraEnv }}
+  {{ $key }}: {{ $value | quote }}
+{{- end }}

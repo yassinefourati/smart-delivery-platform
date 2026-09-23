@@ -71,4 +71,22 @@ class ArchitectureTest {
             noClasses().that().resideOutsideOfPackages("..event..", "..config..")
                     .should().dependOnClassesThat().resideInAPackage("org.springframework.kafka..")
                     .because("Kafka is an implementation detail of the event layer");
+
+    /**
+     * Sharper than {@link #businessCodeDoesNotPublishToKafkaDirectly}, and only possible
+     * since Phase 19: the outbox poller moved to {@code platform-starter}
+     * (ADR 009), so <em>nothing in this service</em> has a legitimate reason to hold a
+     * KafkaTemplate any more -- not even the event layer, which now only writes rows.
+     * The single exemption is {@code KafkaConsumerConfig} handing one to Spring Kafka's
+     * DeadLetterPublishingRecoverer so a poison message can be republished, which is
+     * framework wiring rather than this service deciding to announce something.
+     *
+     * Stated as its own rule rather than by tightening the one above, because the two
+     * fail for different reasons and the message matters when one does.
+     */
+    @ArchTest
+    static final ArchRule nothingOutsideTheDeadLetterWiringHoldsAKafkaTemplate =
+            noClasses().that().resideOutsideOfPackage("..config..")
+                    .should().dependOnClassesThat().haveFullyQualifiedName("org.springframework.kafka.core.KafkaTemplate")
+                    .because("since Phase 19 the outbox poller lives in platform-starter; publishing means writing an outbox row");
 }

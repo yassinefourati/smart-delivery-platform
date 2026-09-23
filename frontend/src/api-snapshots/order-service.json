@@ -1,0 +1,384 @@
+{
+  "components": {
+    "schemas": {
+      "CreateOrderRequest": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OrderItemRequest"
+            },
+            "type": "array"
+          },
+          "shippingAddressId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "items",
+          "shippingAddressId"
+        ],
+        "type": "object"
+      },
+      "OrderItemRequest": {
+        "properties": {
+          "productId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "quantity": {
+            "format": "int32",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "productId"
+        ],
+        "type": "object"
+      },
+      "OrderItemResponse": {
+        "properties": {
+          "lineTotal": {
+            "type": "number"
+          },
+          "productId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "productName": {
+            "type": "string"
+          },
+          "quantity": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "unitPrice": {
+            "type": "number"
+          }
+        },
+        "type": "object"
+      },
+      "OrderPageResponse": {
+        "properties": {
+          "content": {
+            "items": {
+              "$ref": "#/components/schemas/OrderResponse"
+            },
+            "type": "array"
+          },
+          "page": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "size": {
+            "format": "int32",
+            "type": "integer"
+          },
+          "totalElements": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "totalPages": {
+            "format": "int32",
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
+      "OrderResponse": {
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/OrderItemResponse"
+            },
+            "type": "array"
+          },
+          "shippingAddressId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "CREATED",
+              "INVENTORY_RESERVATION_PENDING",
+              "INVENTORY_RESERVED",
+              "PAYMENT_PENDING",
+              "PAID",
+              "SHIPMENT_CREATED",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED",
+              "CANCELLED",
+              "FAILED"
+            ],
+            "type": "string"
+          },
+          "totalAmount": {
+            "type": "number"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "userId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "OrderStatusResponse": {
+        "properties": {
+          "orderId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "CREATED",
+              "INVENTORY_RESERVATION_PENDING",
+              "INVENTORY_RESERVED",
+              "PAYMENT_PENDING",
+              "PAID",
+              "SHIPMENT_CREATED",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED",
+              "CANCELLED",
+              "FAILED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "Pageable": {
+        "properties": {
+          "page": {
+            "format": "int32",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "size": {
+            "format": "int32",
+            "minimum": 1,
+            "type": "integer"
+          },
+          "sort": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "JWT",
+        "description": "An RS256 access token from POST /api/v1/auth/login, verified against user-service's published JWKS (ADR 007). Paste the token value only, without the \"Bearer \" prefix -- Swagger UI adds it.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Order placement, tracking, and cancellation",
+    "title": "Order Service API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/orders": {
+      "post": {
+        "operationId": "create",
+        "parameters": [
+          {
+            "in": "header",
+            "name": "Idempotency-Key",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrderRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Orders"
+        ]
+      }
+    },
+    "/api/v1/orders/user/{userId}": {
+      "get": {
+        "operationId": "listByUser",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "pageable",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Pageable"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderPageResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Orders"
+        ]
+      }
+    },
+    "/api/v1/orders/{id}": {
+      "get": {
+        "operationId": "getById",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Orders"
+        ]
+      }
+    },
+    "/api/v1/orders/{id}/cancel": {
+      "post": {
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Orders"
+        ]
+      }
+    },
+    "/api/v1/orders/{id}/status": {
+      "get": {
+        "operationId": "getStatus",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrderStatusResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Orders"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "description": "Order placement, tracking, and cancellation",
+      "name": "Orders"
+    }
+  ]
+}

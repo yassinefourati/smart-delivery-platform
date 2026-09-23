@@ -73,7 +73,7 @@ class OrderCancellationCompensationIntegrationTest {
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
 
     @Container
-    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.7.1"));
+    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("apache/kafka:3.9.1"));
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
@@ -89,8 +89,10 @@ class OrderCancellationCompensationIntegrationTest {
         // about Resilience4j's, which has its own test (ResilienceIntegrationTest).
         registry.add("resilience4j.retry.instances.payment-service.max-attempts", () -> "1");
         registry.add("resilience4j.retry.instances.inventory-service.max-attempts", () -> "1");
-        // The reaper would otherwise notice these deliberately-stalled orders.
+        // The reaper would otherwise notice these deliberately-stalled orders. Both
+        // properties, because a fixedDelay schedule's first run ignores the interval.
         registry.add("saga.reaper-interval-ms", () -> "3600000");
+        registry.add("saga.reaper-initial-delay-ms", () -> "3600000");
     }
 
     @TestConfiguration

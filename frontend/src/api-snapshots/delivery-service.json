@@ -1,0 +1,461 @@
+{
+  "components": {
+    "schemas": {
+      "AgentResponse": {
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "phone": {
+            "type": "string"
+          },
+          "userId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "AssignDeliveryRequest": {
+        "properties": {
+          "agentId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "agentId"
+        ],
+        "type": "object"
+      },
+      "CreateAgentRequest": {
+        "properties": {
+          "name": {
+            "maxLength": 150,
+            "minLength": 0,
+            "type": "string"
+          },
+          "phone": {
+            "maxLength": 30,
+            "minLength": 0,
+            "type": "string"
+          },
+          "userId": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "phone",
+          "userId"
+        ],
+        "type": "object"
+      },
+      "DeliveryResponse": {
+        "properties": {
+          "agentId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "assignedAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "deliveredAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "shipmentId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "ASSIGNED",
+              "COMPLETED"
+            ],
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "ShipmentResponse": {
+        "properties": {
+          "createdAt": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "orderId": {
+            "format": "uuid",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "CREATED",
+              "ASSIGNED",
+              "DELIVERED"
+            ],
+            "type": "string"
+          },
+          "updatedAt": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "JWT",
+        "description": "An RS256 access token from POST /api/v1/auth/login, verified against user-service's published JWKS (ADR 007). Paste the token value only, without the \"Bearer \" prefix -- Swagger UI adds it.",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "description": "Shipment and delivery agent management",
+    "title": "Delivery Service API",
+    "version": "v1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/agents": {
+      "get": {
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AgentResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Delivery Agents"
+        ]
+      },
+      "post": {
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateAgentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Delivery Agents"
+        ]
+      }
+    },
+    "/api/v1/agents/{id}": {
+      "get": {
+        "operationId": "getById_2",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/AgentResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Delivery Agents"
+        ]
+      }
+    },
+    "/api/v1/deliveries/agent/{userId}": {
+      "get": {
+        "operationId": "listForAgent",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "userId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/DeliveryResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Deliveries"
+        ]
+      }
+    },
+    "/api/v1/deliveries/{id}": {
+      "get": {
+        "operationId": "getById_1",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Deliveries"
+        ]
+      }
+    },
+    "/api/v1/deliveries/{id}/complete": {
+      "post": {
+        "operationId": "complete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Deliveries"
+        ]
+      }
+    },
+    "/api/v1/shipments": {
+      "get": {
+        "operationId": "list_1",
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ShipmentResponse"
+                  },
+                  "type": "array"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Shipments"
+        ]
+      }
+    },
+    "/api/v1/shipments/order/{orderId}": {
+      "get": {
+        "operationId": "getByOrderId",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "orderId",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Shipments"
+        ]
+      }
+    },
+    "/api/v1/shipments/{id}": {
+      "get": {
+        "operationId": "getById",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Shipments"
+        ]
+      }
+    },
+    "/api/v1/shipments/{id}/assign": {
+      "post": {
+        "operationId": "assign",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssignDeliveryRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeliveryResponse"
+                }
+              }
+            },
+            "description": "OK"
+          }
+        },
+        "tags": [
+          "Shipments"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "description": "Delivery agent management (ADMIN only)",
+      "name": "Delivery Agents"
+    },
+    {
+      "description": "Delivery agent's own assignments (ADMIN or the assigned DELIVERY_AGENT)",
+      "name": "Deliveries"
+    },
+    {
+      "description": "Shipment visibility and agent dispatch (ADMIN only)",
+      "name": "Shipments"
+    }
+  ]
+}

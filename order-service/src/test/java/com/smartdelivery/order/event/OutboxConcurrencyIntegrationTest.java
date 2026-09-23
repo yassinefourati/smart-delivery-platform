@@ -1,5 +1,11 @@
 package com.smartdelivery.order.event;
 
+import com.smartdelivery.platform.outbox.OutboxEvent;
+import com.smartdelivery.platform.outbox.OutboxEventRepository;
+import com.smartdelivery.platform.outbox.OutboxMetrics;
+import com.smartdelivery.platform.outbox.OutboxProperties;
+import com.smartdelivery.platform.outbox.OutboxPublisher;
+import com.smartdelivery.platform.outbox.OutboxStatus;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
@@ -75,7 +81,7 @@ class OutboxConcurrencyIntegrationTest {
     static PostgreSQLContainer<?> postgres = new PostgreSQLContainer<>("postgres:17-alpine");
 
     @Container
-    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("confluentinc/cp-kafka:7.7.1"));
+    static KafkaContainer kafka = new KafkaContainer(DockerImageName.parse("apache/kafka:3.9.1"));
 
     @DynamicPropertySource
     static void configureProperties(DynamicPropertyRegistry registry) {
@@ -83,11 +89,14 @@ class OutboxConcurrencyIntegrationTest {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.kafka.bootstrap-servers", kafka::getBootstrapServers);
-        // An hour means the application's own poller and cleanup job each run once at
-        // startup, before this test has written anything, and never again while it runs.
-        // Without this they would race every test in this class for its own rows.
+        // Parks the application's own poller and cleanup job for the whole run. The
+        // interval alone is not enough: a fixedDelay schedule's first run fires at startup
+        // whatever the interval, and on a slow runner that run can land while a test is
+        // still writing its rows. Without both they race every test in this class.
         registry.add("outbox.poll-interval-ms", () -> "3600000");
         registry.add("outbox.cleanup-interval-ms", () -> "3600000");
+        registry.add("outbox.poll-initial-delay-ms", () -> "3600000");
+        registry.add("outbox.cleanup-initial-delay-ms", () -> "3600000");
     }
 
     /**

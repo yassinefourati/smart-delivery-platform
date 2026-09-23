@@ -87,10 +87,17 @@ boundaries were chosen so that:
   [ADR 002](adr/002-kafka-for-events.md) and [saga.md](saga.md).
 - **No shared domain module.** A shared library of DTOs/entities used by every service
   looks convenient early on and becomes the thing that makes every deploy a
-  cross-team coordination problem. Services duplicate small amounts of boilerplate
-  (e.g. a standard error response shape) instead of sharing a JAR. The only thing
-  services share is the parent Maven POM, and that only manages dependency
-  **versions** — it contributes no code.
+  cross-team coordination problem. Event payloads and `EventEnvelope` stay duplicated
+  per service for exactly that reason ([ADR 002](adr/002-kafka-for-events.md)); so do
+  domain types, repositories, and each service's `SecurityFilterChain`.
+
+  Phase 19 drew the line explicitly rather than leaving it to habit. There is now one
+  shared module, `platform-starter`, and it holds **infrastructure only**: correlation
+  ids, the error contract, resource-server wiring, the transactional outbox, and OpenAPI
+  metadata — nearly 4,000 lines that had been copied service to service, and where
+  divergence is a bug rather than a design choice. Nothing domain-shaped may go in it.
+  [ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md) is the boundary,
+  including what is deliberately left duplicated and why.
 
 ## Request flow: synchronous vs. asynchronous
 
@@ -111,16 +118,30 @@ Docker Compose on one bridge network (`smart-delivery-net`). There is no service
 registry (Eureka/Consul): the gateway and inter-service calls use static Docker Compose
 DNS names, overridable via environment variables. This is a deliberate simplification —
 see [ADR discussion below](#deferred-decisions) — appropriate while every service runs
-as exactly one instance. Kubernetes is explicitly out of scope until the Docker Compose
-system is fully working (see the master engineering brief, section 25).
+as exactly one instance.
+
+Since Phase 20 there is also a Helm chart under `deploy/helm/`, and every service is ready
+to run as more than one replica -- probes, graceful shutdown, container-aware JVM flags,
+and connection budgets that add up across replicas. It has been rendered and validated
+but **never applied to a cluster**, because there is no cluster to apply it to. See
+[kubernetes.md](kubernetes.md).
+
+Since Phase 21 the one client is a React SPA (`frontend/`), served by nginx on port 8088
+in Compose. The browser only ever talks to that one origin: nginx serves the bundle and
+proxies `/api` to the gateway, so there is no CORS configuration anywhere
+([ADR 011](adr/011-same-origin-react-spa.md), [frontend.md](frontend.md)). Under
+Kubernetes the Ingress does the same split.
 
 ## Deferred decisions
 
 Documented here so they aren't silently forgotten:
 
 - **Service discovery.** Static DNS via Docker Compose is sufficient for one instance
-  per service. If/when services need multiple replicas locally, this is revisited
-  (Eureka or Consul, or moving to Kubernetes Services, which give this for free).
+  per service, and there is deliberately no registry (Eureka or Consul). The route to
+  multiple replicas is Kubernetes Services, which give DNS, load balancing and
+  health-based endpoint removal with no registry to run -- and the Helm chart uses exactly
+  that (Phase 20, [kubernetes.md](kubernetes.md)). Adding a registry there would mean
+  operating a second discovery mechanism beside the one the platform already provides.
 - **API Gateway authentication enforcement.** JWT validation at the edge vs. per-service
   is decided in [security.md](security.md) once the User Service issues tokens
   (Phase 2).

@@ -3,6 +3,8 @@ package com.smartdelivery.order.event;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.smartdelivery.order.domain.Order;
 import com.smartdelivery.order.domain.OrderStatus;
+import com.smartdelivery.platform.outbox.OutboxEvent;
+import com.smartdelivery.platform.outbox.OutboxEventRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;

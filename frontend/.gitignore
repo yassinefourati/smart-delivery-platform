@@ -1,0 +1,28 @@
+# frontend/ is a separate build from the Maven reactor (ADR 010) and carries its own
+# ignores; the repository root .gitignore knows nothing about npm.
+
+node_modules/
+dist/
+coverage/
+
+# Vite
+.vite/
+*.local
+vite.config.ts.timestamp-*
+
+# Test and tool caches
+.eslintcache
+.tsbuildinfo
+*.tsbuildinfo
+
+# Env files. There are no secrets in this client -- the browser holds no credential it was
+# not handed by a login -- but an env file is still a developer's local machine, not a
+# shared fact, and VITE_ variables are INLINED INTO THE BUNDLE at build time, so anything
+# secret written here would be published. See src/config.ts.
+.env
+.env.*
+!.env.example
+
+# Editors / OS
+.DS_Store
+Thumbs.db

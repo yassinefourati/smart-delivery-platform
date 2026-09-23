@@ -14,8 +14,7 @@ Every service already exposes, via Spring Boot Actuator:
 `CorrelationIdGlobalFilter` in api-gateway generates a `correlationId` (or forwards one
 already supplied by the client via an `X-Correlation-Id` header) and re-attaches it to
 every proxied backend call and to the response, so a client that didn't send one can
-still find it afterward. Each backend service's own `CorrelationIdFilter` reads that
-header, puts it in the SLF4J MDC for the duration of the request, and re-attaches it to
+still find it afterward. `CorrelationIdFilter` reads that header, puts it in the SLF4J MDC for the duration of the request, and re-attaches it to
 any outbound REST call (`ProductServiceClient`/`InventoryServiceClient`/
 `PaymentServiceClient` in order-service) or Kafka event the request triggers — every
 `EventEnvelope.correlationId` published now carries the request's actual id, read back
@@ -25,7 +24,15 @@ those events (`OrderSagaEventListener`, `OrderSagaStartListener`,
 correlation id back into the MDC for the duration of their handling, so consumer-side
 logs carry it too.
 
-Each backend `CorrelationIdFilter` runs at `Ordered.HIGHEST_PRECEDENCE + 2` — one step
+`CorrelationIdFilter` lives once in `platform-starter` since Phase 19
+([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)) — it was six
+byte-identical copies before — and is registered by auto-configuration in any servlet
+service that depends on the starter. api-gateway keeps its own reactive
+`CorrelationIdGlobalFilter`, which is genuinely different code rather than a seventh
+copy: a WebFlux request is not pinned to one thread, so an `MDC.put` there would not
+reliably still be visible by the time a later log statement runs.
+
+`CorrelationIdFilter` runs at `Ordered.HIGHEST_PRECEDENCE + 2` — one step
 after Spring Boot's own `ServerHttpObservationFilter` (registered at
 `HIGHEST_PRECEDENCE + 1`), so the request's tracing span already exists by the time the
 filter tags it (see Tracing below), and still well ahead of Spring Security, so
@@ -59,6 +66,14 @@ the plain-text pattern above, since the `docker` profile is never active there.
 Compose container name; a `prometheus` service in `docker-compose.yml` runs it,
 persisting data to the `prometheus-data` volume, reachable at `localhost:9090`.
 
+**Until Phase 20, six of those eight scrapes were failing with `401`.** The endpoint was
+exposed, but it was missing from every `SecurityConfig`'s public list, and those lists
+match paths exactly -- so Prometheus, which sends no token, was rejected by every service
+with a security filter chain. Only api-gateway and notification-service, which have none,
+were ever scraped. `/actuator/prometheus` is now public on all six and was confirmed to
+return `200` unauthenticated against the running services
+([kubernetes.md](kubernetes.md#the-bug-that-would-have-stopped-every-pod)).
+
 `management.metrics.distribution.percentiles-histogram.http.server.requests: true` is
 set on every service so Prometheus gets the `_bucket` series `histogram_quantile` needs
 for the latency dashboard panel below — without it, Micrometer only exports the count
@@ -73,8 +88,15 @@ user-initiated cancellation. It backs the "order processing failure rate" dashbo
 panel — the one genuinely business-specific panel, since a healthy JVM with a broken
 saga is the failure mode that matters most here.
 
+**Concurrent idempotent replays (Phase 21).** `order.idempotency.concurrent.replays`
+(`order_idempotency_concurrent_replays_total`) counts create requests that lost the
+unique-index race to a simultaneous request with the same `Idempotency-Key` and were
+answered with the winner's order ([order-flow.md](order-flow.md#idempotency)). A steady
+trickle is double-clicks and client retries being absorbed, which is the key doing its
+job; a jump after a frontend deploy means the client started sending duplicates again.
+
 **Outbox metrics (Phase 15).** Four meters per publishing service (order, inventory,
-payment, delivery — `OutboxMetrics`, see
+payment, delivery — `OutboxMetrics`, one copy in `platform-starter` since Phase 19, see
 [ADR 006](adr/006-outbox-concurrency-and-ordering.md)):
 
 | Metric | Type | Tags | What it says |
@@ -148,7 +170,9 @@ file's syntax and interpolation, `mvn compile`/`test` confirm every service buil
 starts, and the Prometheus/Tempo/Grafana config files were checked for valid YAML/JSON
 syntax — but the dashboards' PromQL queries, the Prometheus scrape targets actually
 succeeding, and the OTLP export actually reaching Tempo have not been exercised against
-a running stack. Metric names used in the dashboard (`http_server_requests_seconds_*`,
+a running stack. (Phase 20 confirmed the second of those was a real gap rather than a
+theoretical one: six of the eight scrape targets had been returning `401`. Now fixed --
+see above.) Metric names used in the dashboard (`http_server_requests_seconds_*`,
 `jvm_memory_used_bytes`, `jvm_gc_pause_seconds_sum`, `hikaricp_connections_*`) are
 Micrometer/Spring Boot's standard, documented metric names, not custom instrumentation,
 so this is a low-risk gap — but it is a real one, and running `docker compose up` to
@@ -171,7 +195,7 @@ with no production traffic volume to worry about; the first thing to turn down i
 config were ever reused for a real deployment). `spring.application.name` (already set
 per-service) becomes each span's `service.name` resource attribute automatically.
 
-Each backend service's `CorrelationIdFilter` tags the current request's span with
+`CorrelationIdFilter` tags the current request's span with
 `correlationId` (via `Tracer.currentSpan().tag(...)`, resolved through an
 `ObjectProvider<Tracer>` so the filter doesn't require tracing to be present), so a trace
 in Tempo and the corresponding log lines can be cross-referenced by the same id.

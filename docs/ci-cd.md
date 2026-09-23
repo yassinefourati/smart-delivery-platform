@@ -4,7 +4,7 @@
 
 ## Jobs
 
-- **`build-and-test`** — `mvn -B clean verify` across the whole 8-module reactor: every
+- **`build-and-test`** — `mvn -B clean verify` across the whole 9-module reactor (8 services plus `platform-starter`): every
   unit test and every Testcontainers integration test (see
   [docs/testing.md](testing.md)) runs here, since GitHub Actions runners have Docker
   available (unlike the sandbox this platform was built in). Since Phase 18 the same
@@ -13,8 +13,12 @@
   drift from what a developer runs locally. Surefire reports *and* the JaCoCo/SpotBugs
   reports are uploaded as build artifacts on every run, pass or fail, so a failure's
   actual output is one click away instead of buried in the raw log.
+- **`frontend`** (Phase 21) — `npm ci`, then typecheck, lint (zero warnings), the
+  Vitest suite with its coverage floors, and a production build, for the React app in
+  `frontend/`. The same four commands run inside `frontend/Dockerfile`, so an image cannot
+  be built from code that fails them. See [docs/frontend.md](frontend.md).
 - **`docker-build`** — builds each of the 8 services' Docker images from their
-  `Dockerfile`s, matrix'd so one service's build failing doesn't block the others from
+  `Dockerfile`s, plus the frontend's (since Phase 21, from `frontend/` as its build context), matrix'd so one service's build failing doesn't block the others from
   reporting. Every push and PR gets a real build (proving the `Dockerfile` still
   produces a working image), cached via `type=gha` so a small code change doesn't
   re-resolve every Maven dependency from scratch. Since Phase 18 the image is built with
@@ -26,15 +30,25 @@
   one.
 - **`e2e-smoke`** — runs `scripts/e2e-smoke.sh` against the real `docker-compose.yml`
   stack: `docker compose up -d --build`, wait for health, then drive a complete customer
-  journey **through the gateway only**. See [the section below](#end-to-end-smoke-test).
+  journey **through the gateway only**. Since Phase 21 it also checks the web tier on
+  :8088 -- the SPA shell with its CSP header, the history fallback for a deep link, and
+  `/api` proxied same-origin -- three things that work in `npm run dev` regardless and
+  can only break in the production nginx. See [the section below](#end-to-end-smoke-test).
 - **`compose-config`** — `docker compose config --quiet`, validating `docker-compose.yml`
   parses and every variable substitution resolves, on every push and PR.
+- **`helm-chart`** (Phase 20) — `helm lint`, then `helm template` with the default values
+  and with `values-production.yaml`, then `kubeconform -strict` against the published
+  Kubernetes API schemas, and finally a deliberately **unsafe** render that must fail:
+  the chart's grace-period guard has to refuse a `terminationGracePeriodSeconds` below
+  `preStop + 2 x timeout-per-shutdown-phase`. A guard nobody fires is a guard nobody
+  knows still works. The Prometheus Operator CRDs have no published schema, so
+  kubeconform skips those two objects rather than failing on them.
 
 ## Published images
 
 `ghcr.io/yassinefourati/smart-delivery-platform/<service>:latest` (and
-`:<commit-sha>` for a specific build) for each of the 8 services, published on every
-push to `main`. No extra registry secret is needed — GHCR accepts the workflow's own
+`:<commit-sha>` for a specific build) for each of the 8 services and, since Phase 21,
+`frontend`, published on every push to `main`. No extra registry secret is needed — GHCR accepts the workflow's own
 automatic `GITHUB_TOKEN`, scoped to `packages: write` at the job level only (every other
 job, and every step in this job before the publish, only needs `contents: read`).
 
@@ -57,21 +71,41 @@ container-backed integration tests) was run once, the resulting per-module line 
 read off the JaCoCo report, and each module's floor set to that number rounded **down**
 to the nearest whole percent:
 
-| Module | Measured line coverage | Enforced floor |
-|---|---|---|
-| api-gateway | 87.50% | 0.87 |
-| user-service | 92.74% | 0.92 |
-| product-service | 91.16% | 0.91 |
-| inventory-service | 91.86% | 0.91 |
-| order-service | 90.65% | 0.90 |
-| payment-service | 89.44% | 0.89 |
-| delivery-service | 87.09% | 0.87 |
-| notification-service | 96.81% | 0.96 |
+| Module | Measured line coverage | Enforced floor | Was (Phase 18) |
+|---|---|---|---|
+| platform-starter | 95.18% | 0.95 | — (new in Phase 19) |
+| api-gateway | 87.50% | 0.87 | 0.87 |
+| user-service | 94.90% | 0.94 | 0.92 |
+| product-service | 92.17% | 0.92 | 0.91 |
+| inventory-service | 91.30% | 0.91 | 0.91 |
+| order-service | 89.51% | 0.89 | 0.90 |
+| payment-service | 87.72% | 0.87 | 0.89 |
+| delivery-service | 86.04% | 0.86 | 0.87 |
+| notification-service | 96.81% | 0.96 | 0.96 |
 
 So the gate's job is not "reach 80%" — it is **"do not go backwards"**. A change that
 adds untested code fails the module it landed in; a change that adds tests raises the
 headroom and nothing else. The floors are worth re-measuring and raising when a phase
 meaningfully improves coverage; they should never be lowered to make a build pass.
+
+### Why three floors went down in Phase 19
+
+order-, payment- and delivery-service each dropped about one point, which looks exactly
+like the thing the paragraph above forbids. It is worth being explicit that it is not.
+
+Phase 19 moved roughly 4,000 lines of shared infrastructure out of the service modules
+and into `platform-starter` ([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)).
+The outbox classes in particular were among the best-covered code those modules had —
+unit-tested *and* driven by container-backed integration tests — so removing them lowered
+the average of what stayed, in the same way removing the top three marks lowers a class
+average without anyone having done worse. Nothing became less tested: that code now sits
+in `platform-starter` at **95.18%**, higher than any module it left, and platform-wide
+line coverage across all nine modules is **91.18%** (2,130 of 2,336 lines).
+
+The distinction that matters, and the rule to apply next time: a floor may be re-measured
+downward when **the module's contents changed** — code moved out, or a module was split —
+and never when the same code simply became less tested. The check is whether the covered
+lines went somewhere, not whether the percentage moved.
 
 One caveat worth stating plainly: these numbers include the Testcontainers tests, so
 they can only be met on a machine with Docker. Running `mvn verify` with the container
@@ -118,11 +152,17 @@ the codebase already follows so it keeps following it:
   is how transaction boundaries and business rules quietly stop being enforced;
 - **domain classes never depend on web/DTO classes** — the dependency runs inwards, so a
   DTO change can't ripple into the domain model;
-- **only the `event` package touches `KafkaTemplate`** — this is the rule that protects
-  the outbox ([ADR 004](adr/004-outbox-pattern.md)): a service class publishing directly
-  to Kafka is exactly the dual-write the outbox exists to prevent. The `config` package is
+- **only the `event` package touches Kafka at all** — this is the rule that protects the
+  outbox ([ADR 004](adr/004-outbox-pattern.md)): a service class publishing directly to
+  Kafka is exactly the dual-write the outbox exists to prevent. The `config` package is
   exempt because `KafkaConsumerConfig` legitimately hands a `KafkaTemplate` to Spring's
-  `DeadLetterPublishingRecoverer`.
+  `DeadLetterPublishingRecoverer`;
+- **nothing outside `config` holds a `KafkaTemplate` at all** (added in Phase 19). Once the
+  outbox poller moved to `platform-starter`
+  ([ADR 009](adr/009-platform-starter-and-the-shared-code-boundary.md)), not even the
+  `event` package had a reason to hold one — it writes rows now. A rule that can be
+  tightened after a refactor is worth tightening; leaving it at the old boundary would
+  quietly permit exactly the thing the refactor removed.
 
 notification-service gets a **different** set of rules rather than the shared four,
 because it genuinely has no web, domain, repository, or service packages — it is a pure
@@ -222,17 +262,18 @@ deployment that doesn't set them gets no seeded account at all.
 ## Dependency updates
 
 `.github/dependabot.yml` — weekly PRs for the Maven reactor (one entry at the repo root
-covers all 8 modules' `dependencyManagement`), the 8 services' Dockerfile base images
+covers all 9 modules' `dependencyManagement`), the 8 services' Dockerfile base images
 (one entry per Dockerfile, since Dependabot's Docker ecosystem doesn't follow images
 transitively across files), and the GitHub Actions used in `ci.yml` itself.
 
 ## What's deliberately not here
 
 **Deployment.** This pipeline builds, tests, and publishes images — it does not deploy
-them anywhere. There is no Kubernetes manifest, Helm chart, or cloud environment
-anywhere in this repository to deploy *to*; adding a "deploy" job would mean inventing
-infrastructure this project doesn't have and pointing at a target that doesn't exist,
-which is worse than not having the step. `docker-compose.yml` remains the actual
+them anywhere. Since Phase 20 there **is** a Helm chart (`deploy/helm/`), but there is
+still no cluster to deploy it *to*; a "deploy" job would point at a target that does not
+exist, which is worse than not having the step. What CI does instead is keep the chart
+honest: the `helm-chart` job renders it on every push (see below), because an unapplied
+chart's most likely failure is to rot quietly until the day someone needs it. `docker-compose.yml` remains the actual
 "run this platform" mechanism, for local development only (see
 [docs/local-development.md](local-development.md)) — publishing images to GHCR is
 the natural stopping point for a CD pipeline with no real deployment target, and the

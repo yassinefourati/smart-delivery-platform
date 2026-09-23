@@ -1,0 +1,97 @@
+{{/*
+================================================================================
+ONE ServiceMonitor for all eight services, not eight of them. Needs the
+Prometheus Operator CRDs, so it is off by default.
+
+WHY ServiceMonitor AND NOT THE prometheus.io/scrape POD ANNOTATIONS. With
+annotations, every pod inherits the scrape config's own job_name
+("kubernetes-pods"), so all eight services collapse into ONE `job` value -- and
+every panel in infrastructure/grafana/dashboards/platform-overview.json
+aggregates by (job) with a job-templated legend, so the whole dashboard becomes
+one line per panel. The Operator sets `job` from the SERVICE NAME instead, which
+keeps all 15 panels working unedited and hands `namespace`, `service`, `pod` and
+`container` over for free. That is the entire argument, and it is why the Service
+names in this chart are the bare ones.
+
+spec.jobLabel IS DELIBERATELY NOT SET. If it pointed at a label the eight
+Services share -- app.kubernetes.io/part-of, say -- all eight jobs would collapse
+into one series and the dashboard would quietly merge everything: the same failure
+as the annotation approach, arrived at by accident. Relying on the Service name
+has exactly one failure mode and it is visible on Prometheus's /targets page.
+
+The endpoint is selected by port NAME, which is how one object covers ports 8080
+through 8087 and why adding a service is a label on its Service rather than an
+edit here.
+================================================================================
+*/}}
+{{- if .Values.observability.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "sdp.configName" (dict "root" . "name" "platform") }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" . "name" "platform") | nindent 4 }}
+    # MUST match the Prometheus CR's spec.serviceMonitorSelector. With
+    # kube-prometheus-stack that is `release: <the stack's helm release name>`.
+    # Get this wrong and the ServiceMonitor is simply IGNORED -- no error, no
+    # target, blank dashboard. Confirm on /targets the first time this is applied.
+    {{- toYaml .Values.observability.serviceMonitor.extraLabels | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/part-of: smart-delivery-platform
+      # An explicit opt-in on top of part-of, so a future workload in this
+      # namespace with no /actuator -- the React frontend, a one-off Job -- is not
+      # scraped into a permanently-down target. The frontend Service does not
+      # carry it.
+      sdp.metrics/scrape: "true"
+  namespaceSelector:
+    matchNames:
+      - {{ .Release.Namespace }}
+  endpoints:
+    - port: {{ include "sdp.probePortName" . }}
+      path: /actuator/prometheus
+      scheme: http
+      # Matches the global scrape_interval in
+      # infrastructure/prometheus/prometheus.yml, so a panel's rate() window means
+      # the same thing in a cluster as it does under docker-compose.
+      interval: {{ .Values.observability.serviceMonitor.interval }}
+      scrapeTimeout: {{ .Values.observability.serviceMonitor.scrapeTimeout }}
+      relabelings:
+        # `instance` defaults to <pod IP>:<port>, which is unreadable and churns on
+        # every rollout anyway. The pod name still churns -- that is inherent to a
+        # Deployment, and why every dashboard panel aggregates by (job) -- but it is
+        # greppable, it matches the ECS service.node.name field each pod sets from
+        # the downward API, and it joins against kube_pod_* series.
+        - action: replace
+          sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: instance
+      {{- if .Values.observability.serviceMonitor.dropActuatorHttpMetrics }}
+      metricRelabelings:
+        # Drop actuator's own traffic from the HTTP server metrics. Under
+        # docker-compose only a container healthcheck hit /actuator; here the
+        # kubelet probes liveness AND readiness every ~10s per pod and Prometheus
+        # scrapes every {{ .Values.observability.serviceMonitor.interval }}, so on a
+        # cluster with little real traffic probe traffic becomes the MAJORITY of
+        # http_server_requests_seconds_count. That corrupts three panels at once:
+        # "Request rate per service" measures the kubelet, "Error rate per service"
+        # gets an inflated denominator so real 5xx spikes flatten out, and "p95
+        # request latency" is dragged toward actuator's sub-millisecond responses.
+        #
+        # Dropped here rather than by adding uri!~"/actuator.*" to three dashboard
+        # queries, so every future query and SLO inherits the fix instead of having
+        # to remember it. The cost, plainly: actuator request rates become
+        # unqueryable. Nothing wants them.
+        #
+        # VERIFY THIS ONE THING on first use: the rule matches the `uri` label's
+        # value. Read one /actuator/prometheus response and grep the uri values --
+        # if Spring tags actuator requests in some form this regex does not match,
+        # the rule silently drops nothing and those three panels stay diluted while
+        # looking healthy.
+        - action: drop
+          sourceLabels: [__name__, uri]
+          separator: ;
+          regex: http_server_requests_seconds.*;/actuator.*
+      {{- end }}
+{{- end }}

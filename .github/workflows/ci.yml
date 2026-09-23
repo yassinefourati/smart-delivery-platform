@@ -41,8 +41,8 @@ jobs:
         with:
           name: quality-reports
           path: |
-            '**/target/site/jacoco/**'
-            '**/target/spotbugsXml.xml'
+            **/target/site/jacoco/**
+            **/target/spotbugsXml.xml
           if-no-files-found: ignore
 
       - name: Publish test reports
@@ -53,9 +53,46 @@ jobs:
           path: '**/target/surefire-reports/*.txt'
           if-no-files-found: ignore
 
+  # The React SPA's own gate -- the same four commands frontend/Dockerfile runs, so an image
+  # cannot be built from code that fails them. See docs/frontend.md.
+  frontend:
+    name: Frontend (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Formatting
+        run: npm run format:check
+
+      - name: Test (with coverage floors)
+        run: npm run test:coverage
+
+      - name: Build
+        run: npm run build
+
   docker-build:
     name: Docker build (${{ matrix.service }})
-    needs: build-and-test
+    needs: [build-and-test, frontend]
     runs-on: ubuntu-latest
     # Only the publish step needs to write packages; every other step (and every PR
     # build, which never publishes) only needs read access to the checked-out code.
@@ -74,6 +111,7 @@ jobs:
           - payment-service
           - delivery-service
           - notification-service
+          - frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -87,7 +125,9 @@ jobs:
       - name: Build image locally
         uses: docker/build-push-action@v6
         with:
-          context: .
+          # The Java images build from the repo root (they need the parent POM); the SPA
+          # builds from frontend/, and its .dockerignore keeps node_modules out.
+          context: ${{ matrix.service == 'frontend' && 'frontend' || '.' }}
           file: ${{ matrix.service }}/Dockerfile
           load: true
           tags: local/${{ matrix.service }}:ci
@@ -101,7 +141,13 @@ jobs:
       # CRITICAL with no patch yet still fails -- if the base image cannot be fixed, that
       # is a decision to take explicitly, not one to let the scanner make quietly.
       - name: Scan image for CRITICAL vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        # Pinned to a commit, not a tag: a security scanner is the last action whose code
+        # should be able to change under a moved tag. v0.36.0 because older releases call
+        # aquasecurity/setup-trivy by TAG (v0.28.0 -> setup-trivy@v0.2.1), and those tags
+        # no longer exist upstream; v0.36.0 pins setup-trivy by commit. (The original
+        # `@0.28.0` never resolved at all -- the tag has a `v` -- which went unnoticed
+        # until this job first ran, because the build before it had never gone green.)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: local/${{ matrix.service }}:ci
           format: table
@@ -128,7 +174,7 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@v6
         with:
-          context: .
+          context: ${{ matrix.service == 'frontend' && 'frontend' || '.' }}
           file: ${{ matrix.service }}/Dockerfile
           push: true
           tags: |
@@ -146,6 +192,56 @@ jobs:
 
       - name: Validate compose configuration
         run: docker compose config --quiet
+
+  # There is no cluster to deploy to, so the Helm chart is never applied -- which makes
+  # rot its most likely failure. This job keeps it honest on every push: it must lint,
+  # render with both values files, validate against the real Kubernetes API schemas, and
+  # a deliberately unsafe render must still be REFUSED, so the guard is known to work.
+  # See docs/kubernetes.md and docs/ci-cd.md.
+  helm-chart:
+    name: Validate Helm chart
+    runs-on: ubuntu-latest
+    env:
+      CHART: deploy/helm/smart-delivery-platform
+      # helm template has no cluster to ask, and the chart requires >= 1.25.
+      KUBE_VERSION: 1.30.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.16.3
+
+      - name: Lint
+        run: |
+          helm lint "$CHART"
+          helm lint "$CHART" -f "$CHART/values-production.yaml"
+
+      - name: Render
+        run: |
+          helm template sdp "$CHART" --kube-version "$KUBE_VERSION" > rendered-default.yaml
+          helm template sdp "$CHART" --kube-version "$KUBE_VERSION" \
+            -f "$CHART/values-production.yaml" \
+            --set secrets.create=true --set frontend.enabled=true > rendered-full.yaml
+
+      - name: Validate against the Kubernetes API schemas
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz \
+            | tar xz kubeconform
+          # The Prometheus Operator CRDs (ServiceMonitor, PrometheusRule) publish no schema.
+          ./kubeconform -strict -summary -ignore-missing-schemas \
+            -kubernetes-version "$KUBE_VERSION" rendered-default.yaml rendered-full.yaml
+
+      - name: An unsafe grace period must be refused
+        run: |
+          if helm template sdp "$CHART" --kube-version "$KUBE_VERSION" \
+               --set services.order-service.terminationGracePeriodSeconds=10 >/dev/null 2>guard.err; then
+            echo "::error::the grace-period guard did not fire -- the chart would SIGKILL pods mid-shutdown"
+            exit 1
+          fi
+          grep -q "terminationGracePeriodSeconds is 10" guard.err
 
   # The one job that exercises the platform as a platform: eight services started
   # together, finding each other, sharing a broker, carrying an order across process

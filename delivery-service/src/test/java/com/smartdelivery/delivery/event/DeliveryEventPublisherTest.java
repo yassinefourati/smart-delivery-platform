@@ -1,6 +1,9 @@
 package com.smartdelivery.delivery.event;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.smartdelivery.platform.outbox.OutboxEvent;
+import com.smartdelivery.platform.outbox.OutboxEventRepository;
+import com.smartdelivery.platform.outbox.OutboxStatus;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;

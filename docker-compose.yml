@@ -83,12 +83,26 @@ services:
       - smart-delivery-net
     restart: unless-stopped
 
+  # The only entry point clients are given, and since Phase 19 the only place API
+  # documentation is served: http://localhost:8080/swagger-ui.html aggregates every
+  # service's OpenAPI document into one UI with a service picker (docs/api-documentation.md).
+  #
+  # Each backend service pins its document's `servers` entry to PUBLIC_GATEWAY_URL, which
+  # defaults to http://localhost:8080 -- correct here, because that is where a browser on
+  # the host reaches this gateway. A real deployment behind a domain name sets it.
   api-gateway:
     <<: *service-defaults
     build:
       context: .
       dockerfile: api-gateway/Dockerfile
     container_name: sdp-api-gateway
+    # Matches this service's Kubernetes memory request/limit, and it has to be here for
+    # the image's JAVA_OPTS to mean anything: -XX:MaxRAMPercentage is a percentage OF THE
+    # CGROUP LIMIT, and with no limit set the JVM reads the host's RAM instead -- so eight
+    # containers would each size a heap from the whole laptop. Limits, not reservations:
+    # Linux only backs heap pages when they are touched, so a service that uses 400MB
+    # shows 400MB in `docker stats` whatever this says.
+    mem_limit: 1g
     ports:
       - "8080:8080"
     environment:
@@ -126,6 +140,8 @@ services:
       context: .
       dockerfile: user-service/Dockerfile
     container_name: sdp-user-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8081:8081"
     environment:
@@ -164,6 +180,8 @@ services:
       context: .
       dockerfile: product-service/Dockerfile
     container_name: sdp-product-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 1g
     ports:
       - "8082:8082"
     environment:
@@ -195,6 +213,8 @@ services:
       context: .
       dockerfile: inventory-service/Dockerfile
     container_name: sdp-inventory-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8083:8083"
     environment:
@@ -223,6 +243,8 @@ services:
       context: .
       dockerfile: order-service/Dockerfile
     container_name: sdp-order-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 1g
     ports:
       - "8084:8084"
     environment:
@@ -265,6 +287,8 @@ services:
       context: .
       dockerfile: payment-service/Dockerfile
     container_name: sdp-payment-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8085:8085"
     environment:
@@ -293,6 +317,8 @@ services:
       context: .
       dockerfile: delivery-service/Dockerfile
     container_name: sdp-delivery-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 768m
     ports:
       - "8086:8086"
     environment:
@@ -321,6 +347,8 @@ services:
       context: .
       dockerfile: notification-service/Dockerfile
     container_name: sdp-notification-service
+    # The Kubernetes memory limit -- required for JAVA_OPTS; see api-gateway above.
+    mem_limit: 512m
     ports:
       - "8087:8087"
     environment:
@@ -336,6 +364,31 @@ services:
       timeout: 5s
       retries: 10
       start_period: 30s
+
+  # The React SPA (frontend/, docs/frontend.md). This nginx is the single origin for the
+  # browser: it serves the bundle and proxies /api and /.well-known to the gateway, which is
+  # why the app needs no CORS and can use connect-src 'self'. gateway-proxy.conf is mounted
+  # rather than baked in because under Kubernetes the Ingress does that routing instead.
+  # Port 8088 because 3000 is Grafana and 8080-8087 are the services.
+  web:
+    <<: *service-defaults
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: sdp-web
+    mem_limit: 128m
+    ports:
+      - "8088:8080"
+    volumes:
+      - ./frontend/nginx/gateway-proxy.conf:/etc/nginx/sdp/gateway-proxy.conf:ro
+    depends_on:
+      api-gateway:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/index.html"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
 
   prometheus:
     image: prom/prometheus:v3.7.3

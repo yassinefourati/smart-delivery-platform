@@ -1,6 +1,6 @@
 package com.smartdelivery.order.security;
 
-import com.smartdelivery.order.exception.ErrorResponse;
+import com.smartdelivery.platform.autoconfigure.PlatformSecurityAutoConfiguration;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -41,8 +41,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
  *
  * Deliberately not a full {@code @SpringBootTest} of the application, which would need
  * Postgres and Kafka: this is a narrow slice of exactly the beans the contract depends
- * on -- the real {@link SecurityConfig}, the real converter, the real entry point and
- * access-denied handler, and Spring Security's own resource-server autoconfiguration --
+ * on -- the real {@link SecurityConfig}, and the real converter, entry point, and
+ * access-denied handler that {@link PlatformSecurityAutoConfiguration} now supplies
+ * (Phase 19, ADR 009), plus Spring Security's own resource-server autoconfiguration --
  * pointed at a stub JWKS endpoint. Same approach, and the same motivation, as
  * {@code ResilienceIntegrationTest}: it runs without containers, so it runs everywhere.
  */
@@ -54,7 +55,11 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
         WebMvcAutoConfiguration.class,
         DispatcherServletAutoConfiguration.class,
         SecurityAutoConfiguration.class,
-        OAuth2ResourceServerAutoConfiguration.class
+        OAuth2ResourceServerAutoConfiguration.class,
+        // The shared converter, entry point, and access-denied handler. Imported as the
+        // auto-configuration rather than as three bean classes, so this test exercises
+        // the wiring a real service actually gets rather than a hand-assembled lookalike.
+        PlatformSecurityAutoConfiguration.class
 })
 class JwtResourceServerIntegrationTest {
 
@@ -74,8 +79,7 @@ class JwtResourceServerIntegrationTest {
     }
 
     @Configuration
-    @Import({SecurityConfig.class, JwtAuthenticationConverterConfig.class,
-            JwtAuthenticationEntryPoint.class, JwtAccessDeniedHandler.class})
+    @Import(SecurityConfig.class)
     static class TestApp {
 
         /**
@@ -206,7 +210,8 @@ class JwtResourceServerIntegrationTest {
     /**
      * Every rejection above must land on the same 401 body as "no token at all" -- a
      * client should not be able to tell an expired token from a forged one, and
-     * {@link ErrorResponse} is the shape docs/security.md promises.
+     * the body is the shape docs/security.md promises, now as an RFC 7807 problem
+     * detail that still carries the original fields (ADR 009).
      */
     private void expectUnauthorized(String token) throws Exception {
         mockMvc.perform(get("/api/v1/probe/authenticated").header("Authorization", bearer(token)))

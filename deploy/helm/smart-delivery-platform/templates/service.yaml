@@ -1,0 +1,96 @@
+{{/*
+================================================================================
+One Service per enabled service.
+
+THE NAME IS PART OF THE OBSERVABILITY CONTRACT, not a cosmetic choice. The
+Prometheus Operator derives the `job` label from the Service name, every one of
+the 15 panels in infrastructure/grafana/dashboards/platform-overview.json
+aggregates by (job) with a job-templated legend, and the eight job_name values
+in infrastructure/prometheus/prometheus.yml are the bare service names. So these
+are named `order-service`, not `<release>-order-service`, and naming.prefix is
+the one knob that changes that -- see its comment in values.yaml for what it
+costs.
+
+THE PORT NAME MATTERS TOO: `http` on all eight, which is how ONE ServiceMonitor
+covers ports 8080 through 8087 without the spread ever appearing in a scrape
+config.
+================================================================================
+*/}}
+{{- $root := . }}
+{{- range $name, $svc := .Values.services }}
+{{- if $svc.enabled }}
+{{- $mgmtPort := int (default 0 $svc.managementPort) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "sdp.name" (dict "root" $root "name" $name) }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "sdp.labels" (dict "root" $root "name" $name "svc" $svc) | nindent 4 }}
+    # The ServiceMonitor's selector requires BOTH this and part-of above. An
+    # explicit opt-in label so a future workload in this namespace with no
+    # /actuator -- the React frontend, a one-off Job -- is not scraped into a
+    # permanently-down target.
+    {{- include "sdp.metricsLabels" $svc | nindent 4 }}
+  {{- with $svc.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if eq $name "api-gateway" }}
+  # ClusterIP, even for the gateway. HOW THE GATEWAY IS ACTUALLY EXPOSED, since
+  # nothing here does it by itself:
+  #
+  #   1. An Ingress (ingress.enabled=true, and the recommended route): one host,
+  #      TLS terminated at the controller, /api/v1 and /.well-known/jwks.json to
+  #      this Service and / to the SPA. Same host for both is what lets the SPA ship
+  #      a base path of "" and build every API URL relative -- there is no CORS
+  #      configuration anywhere in this repository, and adding it is a gateway code
+  #      change plus a new allowed-origins env var plus a preflight failure mode that
+  #      looks like the API being down.
+  #   2. services.api-gateway.service.type=LoadBalancer: a cloud L4 load balancer
+  #      and an IP, with no host routing and no TLS termination. Fine for a demo,
+  #      and it forces the SPA onto a different origin, which is the one thing this
+  #      platform has no CORS for.
+  #   3. kubectl port-forward svc/{{ include "sdp.name" (dict "root" $root "name" $name) }} 8080:{{ $svc.port }}
+  #      -- how to reach the aggregated Swagger UI without exposing anything.
+  {{- else if eq $name "notification-service" }}
+  # notification-service has NO web API: spring-boot-starter-web is there for
+  # Actuator only, it has no controllers and no database. This Service exists
+  # PURELY so it can be scraped -- a role: endpoints ServiceMonitor has nothing to
+  # select without one -- and skipping it would remove notification-service from
+  # all 15 dashboard panels silently. Its only client is Prometheus.
+  {{- end }}
+  type: {{ $svc.service.type }}
+  # Not headless and not publishNotReadyAddresses: this is what the ServiceMonitor
+  # selects, and a role: endpoints scrape only reaches READY pods. That is a real
+  # gap -- a crash-looping pod drops out of the target list entirely, so it is
+  # invisible in metrics exactly when you want it, and `up == 0` cannot fire for a
+  # series that no longer exists. The fix is NOT a second headless Service here:
+  # the Operator derives `job` from the Service NAME, so a second Service would
+  # produce a second job label and split every dashboard panel. Pod-level health
+  # belongs to kube-state-metrics, and the chart's PrometheusRule has a
+  # job-count rule for the case where a whole job disappears.
+  selector:
+    {{- include "sdp.selectorLabels" (dict "root" $root "name" $name) | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ $svc.port }}
+      # Named, not numeric, so a container port change cannot silently orphan the
+      # Service.
+      targetPort: http
+      protocol: TCP
+    {{- if gt $mgmtPort 0 }}
+    # Present only so the ServiceMonitor can reach the management connector. It is
+    # never routed through the Ingress, and the management child context has no
+    # Spring Security filter chain -- so everything in
+    # management.endpoints.web.exposure.include is reachable unauthenticated by
+    # anything that can reach this Service. The NetworkPolicy is what bounds it.
+    - name: mgmt
+      port: {{ $mgmtPort }}
+      targetPort: mgmt
+      protocol: TCP
+    {{- end }}
+{{- end }}
+{{- end }}

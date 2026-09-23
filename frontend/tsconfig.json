@@ -1,0 +1,44 @@
+{
+  // Every non-default flag below is here for a named reason, recorded in the brief's
+  // "TypeScript strictness" decision. `strict: true` alone is hand-waving; these are
+  // responses to things THIS API actually does.
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["vite/client", "vitest/globals"],
+
+    // Vite strips types without checking them, so `tsc --noEmit` IS the type gate.
+    // Nothing in this project emits JavaScript from tsc.
+    "noEmit": true,
+    "skipLibCheck": true,
+    "allowImportingTsExtensions": false,
+    "resolveJsonModule": true,
+
+    "strict": true,
+
+    // The API returns arrays everywhere (`items`, `content`, `roles`, `warehouses`) and
+    // NO response schema in any of the six OpenAPI documents carries a `required` array,
+    // so `items[0]` genuinely can be undefined. This makes the compiler say so.
+    "noUncheckedIndexedAccess": true,
+
+    // Absent and null are different in these payloads. Without this,
+    // `{ state: undefined }` on an AddressRequest serialises to `"state": null`, which is
+    // not the same request as omitting an optional field.
+    "exactOptionalPropertyTypes": true,
+
+    // The order-status switch is this app's core switch. A fallthrough there puts a wrong
+    // state on a real customer's order screen.
+    "noFallthroughCasesInSwitch": true,
+
+    "noImplicitOverride": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": ["src"]
+}

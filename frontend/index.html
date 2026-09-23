@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+    <!--
+      No <meta http-equiv="Content-Security-Policy"> here, deliberately.
+
+      The security header suite -- CSP, Referrer-Policy, X-Content-Type-Options,
+      X-Frame-Options, Permissions-Policy -- is served by the production nginx config, which
+      is the only layer that can set `frame-ancestors` and the only layer both the SPA and
+      its assets pass through. Putting a tight CSP in this document instead would (a) apply
+      it to the Vite dev server, whose HMR client needs inline script and a websocket, so
+      every developer would meet a broken dev server first and a relaxed CSP second, and
+      (b) create a second place the policy is written down, which is how the two drift.
+
+      `connect-src 'self'` is writable at all only because the browser is same-origin with
+      the API -- see the proxy comment in vite.config.ts.
+    -->
+
+    <title>Smart Delivery</title>
+    <meta
+      name="description"
+      content="Smart Delivery -- browse the catalog, place an order and follow it through fulfilment."
+    />
+  </head>
+  <body>
+    <!--
+      The mount point. Everything else is rendered by src/main.tsx.
+
+      No server-rendered content and no loading markup: every screen worth rendering is
+      behind a bearer token held in memory only, so there is nothing this document could
+      usefully paint before the bundle runs.
+    -->
+    <div id="root"></div>
+
+    <noscript>
+      Smart Delivery needs JavaScript. The catalog and live stock are readable without signing in,
+      but not without scripting -- there is no server-rendered fallback, by design.
+    </noscript>
+
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

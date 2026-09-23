@@ -22,6 +22,8 @@
 set -Eeuo pipefail
 
 GATEWAY="${GATEWAY:-http://localhost:8080}"
+# The frontend's nginx (docker-compose.yml `web`), the browser's single origin.
+WEB="${WEB_BASE_URL:-http://localhost:8088}"
 LOG_DIR="${LOG_DIR:-target/e2e-logs}"
 ADMIN_EMAIL="${BOOTSTRAP_ADMIN_EMAIL:-admin@smart-delivery.local}"
 ADMIN_PASSWORD="${BOOTSTRAP_ADMIN_PASSWORD:-local-dev-only-admin-password}"
@@ -37,14 +39,39 @@ info()  { printf '    %s\n' "$*"; }
 pass()  { printf '    \033[0;32mPASS\033[0m %s\n' "$*"; }
 fail()  { printf '    \033[0;31mFAIL\033[0m %s\n' "$*" >&2; exit 1; }
 
-on_error() {
+# An EXIT trap, not ERR: fail() ends the script with an explicit `exit 1`, and bash does
+# not run an ERR trap for that -- so with ERR, every assertion failure (which is every
+# interesting failure) skipped the log dump AND the teardown. EXIT runs on every path.
+on_exit() {
     local exit_code=$?
-    printf '\n\033[0;31mSmoke test failed (exit %s). Dumping logs to %s\033[0m\n' "$exit_code" "$LOG_DIR" >&2
-    mkdir -p "$LOG_DIR"
-    docker compose logs --no-color --timestamps > "$LOG_DIR/docker-compose.log" 2>&1 || true
-    docker compose ps > "$LOG_DIR/docker-compose-ps.txt" 2>&1 || true
+    trap - EXIT
+    if [ "$exit_code" -ne 0 ]; then
+        printf '\n\033[0;31mSmoke test failed (exit %s). Dumping logs to %s\033[0m\n' "$exit_code" "$LOG_DIR" >&2
+        mkdir -p "$LOG_DIR"
+        docker compose logs --no-color --timestamps > "$LOG_DIR/docker-compose.log" 2>&1 || true
+        docker compose ps > "$LOG_DIR/docker-compose-ps.txt" 2>&1 || true
+        print_unhealthy_diagnostics
+    fi
     teardown
     exit "$exit_code"
+}
+
+# The full logs go to $LOG_DIR as an artifact, but an artifact is one download away from
+# the failure and not everyone reading the job can fetch it. So for every container that
+# is not running-and-healthy, the job output itself gets the reason Docker recorded (exit
+# code, OOM kill, the last health-check results) and the tail of its log -- which is the
+# part that names the actual error.
+print_unhealthy_diagnostics() {
+    local id name state
+    for id in $(docker compose ps -a -q 2>/dev/null); do
+        state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id" 2>/dev/null || true)"
+        case "$state" in running/healthy|running/) continue ;; esac
+        name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | tr -d /)"
+        printf '\n\033[0;31m--- %s: %s ---\033[0m\n' "$name" "$state" >&2
+        docker inspect -f 'exit={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} error={{.State.Error}}' "$id" >&2 || true
+        docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}health: exit={{.ExitCode}} {{.Output}}{{end}}{{end}}' "$id" 2>/dev/null | tail -n 3 >&2 || true
+        docker logs --tail 60 "$id" >&2 2>&1 || true
+    done
 }
 
 teardown() {
@@ -55,7 +82,7 @@ teardown() {
     fi
 }
 
-trap on_error ERR
+trap on_exit EXIT
 
 # --- HTTP helpers ------------------------------------------------------------------
 
@@ -98,17 +125,51 @@ fi
 step "Waiting for every service to report healthy (up to ${HEALTH_TIMEOUT_SECONDS}s)"
 deadline=$(( $(date +%s) + HEALTH_TIMEOUT_SECONDS ))
 while :; do
-    # The gateway starts last and only once every backend is healthy (docker-compose.yml),
-    # so the gateway answering is itself the readiness signal for the whole platform.
-    if [ "$(api GET /actuator/health)" = "200" ]; then
+    # Every container with a health check must be `healthy`, not just the gateway: `web`
+    # depends on the gateway, so it is still `starting` for a few seconds after the
+    # gateway first answers. Checking once at that moment failed the run on a container
+    # that was about to be fine. `starting` means keep waiting; `unhealthy` means Docker
+    # has already given up on it, so there is nothing to wait for.
+    not_ready="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$2 != "" && $2 != "healthy"' || true)"
+    if [ -z "$not_ready" ] && [ "$(api GET /actuator/health)" = "200" ]; then
         break
     fi
-    [ "$(date +%s)" -lt "$deadline" ] || fail "services did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s"
+    if printf '%s\n' "$not_ready" | grep -q ' unhealthy$'; then
+        fail "some services are unhealthy: $(printf '%s' "$not_ready" | tr '\n' ' ')"
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] \
+        || fail "services did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s: $(printf '%s' "$not_ready" | tr '\n' ' ')"
     sleep 5
 done
-unhealthy="$(docker compose ps --format '{{.Service}} {{.Health}}' | awk '$2 != "" && $2 != "healthy"' || true)"
-[ -z "$unhealthy" ] || fail "some services are not healthy: $unhealthy"
 pass "all services healthy, gateway answering on $GATEWAY"
+
+# --- the web tier ------------------------------------------------------------------
+# Three things only the production nginx can get wrong, and each one works in `npm run dev`
+# regardless -- which is exactly why they are asserted here (docs/frontend.md).
+
+step "Checking the web tier on $WEB"
+deadline=$(( $(date +%s) + 60 ))
+until [ "$(curl -s -o /dev/null -w '%{http_code}' "$WEB/index.html")" = "200" ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || fail "the web tier did not answer on $WEB within 60s"
+    sleep 2
+done
+
+# 1. The SPA shell, with the security headers on it.
+headers="$(curl -sS -D - -o "$BODY_FILE" "$WEB/")"
+grep -q '<div id="root">' "$BODY_FILE" || fail "GET $WEB/ did not return the SPA shell"
+echo "$headers" | grep -qi "^content-security-policy:.*frame-ancestors 'none'" \
+    || fail "GET $WEB/ is missing the Content-Security-Policy header"
+
+# 2. The history fallback: a deep link has no file, and must still get index.html.
+status=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' "$WEB/orders/00000000-0000-0000-0000-000000000000")
+expect_status 200 "$status" "deep link through the history fallback"
+grep -q '<div id="root">' "$BODY_FILE" || fail "a deep link did not fall back to index.html"
+
+# 3. Same-origin API routing: the browser calls /api on the web origin, never :8080.
+status=$(curl -sS -o "$BODY_FILE" -w '%{http_code}' "$WEB/api/v1/products?size=1")
+expect_status 200 "$status" "GET /api/v1/products through the web origin"
+[ "$(field '.content | type')" = "array" ] || fail "the web origin did not proxy /api to the gateway"
+pass "web tier: shell + CSP, history fallback, and /api proxied same-origin"
 
 # --- identities --------------------------------------------------------------------
 
@@ -327,4 +388,4 @@ pass "order $CANCELLED_ORDER_ID cancelled while PAID, and its payment is REFUNDE
 # --- done ----------------------------------------------------------------------------
 
 step "All smoke checks passed"
-teardown
+# teardown runs from the EXIT trap, on success as on failure.

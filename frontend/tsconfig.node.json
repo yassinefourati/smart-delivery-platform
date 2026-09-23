@@ -1,0 +1,19 @@
+{
+  // The build tooling is typechecked too, separately from `src`, because it runs in Node
+  // and not in the browser -- different libs, different globals. `npm run typecheck` runs
+  // both projects, so a broken proxy config fails the same gate application code does.
+  "compilerOptions": {
+    "target": "ES2023",
+    "lib": ["ES2023"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true
+  },
+  "include": ["vite.config.ts"]
+}
