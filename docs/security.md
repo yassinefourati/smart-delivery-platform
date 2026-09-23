@@ -248,6 +248,7 @@ on; `message` is for humans and may be reworded.
 | `METHOD_NOT_ALLOWED` | 405 | shared |
 | `CONFLICT` | 409 | product, inventory, order, delivery, payment — a duplicate or an illegal state transition |
 | `EMAIL_ALREADY_EXISTS` | 409 | user-service |
+| `IDEMPOTENCY_KEY_CONFLICT` | 409 | order-service -- an `Idempotency-Key` was reused with a different request body. Distinct from `CONFLICT` on purpose: this one is a bug in the caller to fix, not a state to re-read. |
 | `CONCURRENT_MODIFICATION` | 409 | inventory, order — an optimistic-lock loss; the caller should retry |
 | `SERVICE_UNAVAILABLE` | 503 | order-service — a downstream service is down, or Resilience4j refused the call |
 | `INTERNAL_ERROR` | 500 | shared — the catch-all |

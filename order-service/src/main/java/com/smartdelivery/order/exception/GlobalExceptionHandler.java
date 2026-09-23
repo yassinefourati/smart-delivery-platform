@@ -30,10 +30,26 @@ public class GlobalExceptionHandler extends PlatformExceptionHandler {
         return build(HttpStatus.BAD_REQUEST, "INVALID_PRODUCT", ex.getMessage(), request);
     }
 
-    @ExceptionHandler({ProductNotAvailableException.class, IdempotencyKeyConflictException.class,
-            InvalidOrderStateTransitionException.class})
+    @ExceptionHandler({ProductNotAvailableException.class, InvalidOrderStateTransitionException.class})
     public ResponseEntity<ProblemDetail> handleConflict(RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.CONFLICT, "CONFLICT", ex.getMessage(), request);
+    }
+
+    /**
+     * Its own error code, because a client has to tell these two 409s apart and cannot:
+     * "you reused an Idempotency-Key with a different body" is a bug in the caller to fix,
+     * while "this order can no longer be cancelled" is a state it must re-read and show.
+     * Both used to come back as the generic CONFLICT.
+     *
+     * docs/order-flow.md has promised {@code 409 IDEMPOTENCY_KEY_CONFLICT} since Phase 7;
+     * the code emitted CONFLICT, so the documented contract was the one that was right and
+     * the implementation was the defect. Found while building the frontend (Phase 21),
+     * which needed exactly this distinction to decide whether to retry or to surface.
+     */
+    @ExceptionHandler(IdempotencyKeyConflictException.class)
+    public ResponseEntity<ProblemDetail> handleIdempotencyKeyConflict(
+            IdempotencyKeyConflictException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_CONFLICT", ex.getMessage(), request);
     }
 
     @ExceptionHandler(ObjectOptimisticLockingFailureException.class)

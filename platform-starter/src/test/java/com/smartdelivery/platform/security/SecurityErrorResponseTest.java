@@ -42,7 +42,9 @@ class SecurityErrorResponseTest {
                 request("/api/v1/orders"), response, new BadCredentialsException("no token"));
 
         assertThat(response.getStatus()).isEqualTo(401);
-        assertThat(response.getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+        // startsWith, not isEqualTo: the charset is part of the header value, and a
+        // client comparing the whole string for equality is the bug this shape avoids.
+        assertThat(response.getContentType()).startsWith(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
         ObjectNode body = body(response);
         assertThat(body.path("error").asText()).isEqualTo("UNAUTHORIZED");
         assertThat(body.path("status").asInt()).isEqualTo(401);
@@ -60,7 +62,9 @@ class SecurityErrorResponseTest {
                 request("/api/v1/users"), response, new AccessDeniedException("missing ROLE_ADMIN"));
 
         assertThat(response.getStatus()).isEqualTo(403);
-        assertThat(response.getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
+        // startsWith, not isEqualTo: the charset is part of the header value, and a
+        // client comparing the whole string for equality is the bug this shape avoids.
+        assertThat(response.getContentType()).startsWith(MediaType.APPLICATION_PROBLEM_JSON_VALUE);
         ObjectNode body = body(response);
         assertThat(body.path("error").asText()).isEqualTo("FORBIDDEN");
         // Not "missing ROLE_ADMIN": which authority would have worked is not the caller's
@@ -97,6 +101,28 @@ class SecurityErrorResponseTest {
                 request("/api/v1/orders"), response, new BadCredentialsException("no token"));
 
         assertThat(body(response).path("correlationId").asText()).isNotBlank();
+    }
+
+    /**
+     * getWriter() encodes with the servlet default unless told otherwise, so these two
+     * handlers advertised ISO-8859-1 and mangled any non-ASCII in an error message. The
+     * MVC advice path never had this -- Spring's message converter writes UTF-8 -- so only
+     * the handlers that serialize the body themselves were affected.
+     */
+    @Test
+    void bothWriteUtf8SoNonAsciiSurvives() throws Exception {
+        MockHttpServletResponse unauthorized = new MockHttpServletResponse();
+        new JwtAuthenticationEntryPoint(objectMapper).commence(
+                request("/api/v1/orders"), unauthorized, new BadCredentialsException("no token"));
+
+        MockHttpServletResponse forbidden = new MockHttpServletResponse();
+        new JwtAccessDeniedHandler(objectMapper).handle(
+                request("/api/v1/\u00e9t\u00e9"), forbidden, new AccessDeniedException("nope"));
+
+        assertThat(unauthorized.getCharacterEncoding()).isEqualToIgnoringCase("UTF-8");
+        assertThat(forbidden.getCharacterEncoding()).isEqualToIgnoringCase("UTF-8");
+        // The path round-trips intact rather than arriving as mojibake.
+        assertThat(body(forbidden).path("path").asText()).isEqualTo("/api/v1/\u00e9t\u00e9");
     }
 
     private MockHttpServletRequest request(String uri) {

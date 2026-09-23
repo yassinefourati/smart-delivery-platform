@@ -49,6 +49,14 @@ class ApiGatewayRoutingIntegrationTest {
                         exchange.getRequestHeaders().getFirst("X-Correlation-Id")));
                 byte[] body = "{\"stub\":true}".getBytes(StandardCharsets.UTF_8);
                 exchange.getResponseHeaders().add("Content-Type", "application/json");
+                // Echo the header back, because every real backend service does: its own
+                // CorrelationIdFilter sets X-Correlation-Id on the response. Until Phase 21
+                // this stub did not, which is exactly why the duplicate-header bug below
+                // was invisible to this test -- the stub was unrepresentative in the one way
+                // that mattered. A test double that is nicer than production hides
+                // production's bugs.
+                exchange.getResponseHeaders().add(
+                        "X-Correlation-Id", exchange.getRequestHeaders().getFirst("X-Correlation-Id"));
                 exchange.sendResponseHeaders(200, body.length);
                 try (OutputStream os = exchange.getResponseBody()) {
                     os.write(body);
@@ -142,6 +150,28 @@ class ApiGatewayRoutingIntegrationTest {
 
         CapturedRequest captured = awaitCapturedRequest();
         assertThat(captured.correlationId()).isNotBlank();
+    }
+
+    /**
+     * The client must receive the id ONCE. The gateway sets it and so does every backend,
+     * and the gateway used to set it before the routing filter merged the downstream
+     * response headers in -- so both survived and the browser's Headers.get() returned
+     * "<id>, <id>", since the Fetch spec joins duplicate field values with a comma. The
+     * values were always identical, so nothing server-side ever noticed.
+     */
+    @Test
+    void theCorrelationIdIsReturnedExactlyOnceEvenThoughTheBackendAlsoSetsIt() throws InterruptedException {
+        String correlationId = "single-value-check";
+
+        client.get().uri("/api/v1/products/42")
+                .header("X-Correlation-Id", correlationId)
+                .exchange()
+                .expectStatus().isOk()
+                .expectHeader().values("X-Correlation-Id",
+                        values -> org.assertj.core.api.Assertions.assertThat(values)
+                                .containsExactly(correlationId));
+
+        CAPTURED.poll(5, java.util.concurrent.TimeUnit.SECONDS);
     }
 
     @Test
