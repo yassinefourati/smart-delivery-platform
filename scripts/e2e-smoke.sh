@@ -45,8 +45,27 @@ on_error() {
     mkdir -p "$LOG_DIR"
     docker compose logs --no-color --timestamps > "$LOG_DIR/docker-compose.log" 2>&1 || true
     docker compose ps > "$LOG_DIR/docker-compose-ps.txt" 2>&1 || true
+    print_unhealthy_diagnostics
     teardown
     exit "$exit_code"
+}
+
+# The full logs go to $LOG_DIR as an artifact, but an artifact is one download away from
+# the failure and not everyone reading the job can fetch it. So for every container that
+# is not running-and-healthy, the job output itself gets the reason Docker recorded (exit
+# code, OOM kill, the last health-check results) and the tail of its log -- which is the
+# part that names the actual error.
+print_unhealthy_diagnostics() {
+    local id name state
+    for id in $(docker compose ps -a -q 2>/dev/null); do
+        state="$(docker inspect -f '{{.State.Status}}/{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$id" 2>/dev/null || true)"
+        case "$state" in running/healthy|running/) continue ;; esac
+        name="$(docker inspect -f '{{.Name}}' "$id" 2>/dev/null | tr -d /)"
+        printf '\n\033[0;31m--- %s: %s ---\033[0m\n' "$name" "$state" >&2
+        docker inspect -f 'exit={{.State.ExitCode}} oomKilled={{.State.OOMKilled}} restarts={{.RestartCount}} error={{.State.Error}}' "$id" >&2 || true
+        docker inspect -f '{{if .State.Health}}{{range .State.Health.Log}}health: exit={{.ExitCode}} {{.Output}}{{end}}{{end}}' "$id" 2>/dev/null | tail -n 3 >&2 || true
+        docker logs --tail 60 "$id" >&2 2>&1 || true
+    done
 }
 
 teardown() {
