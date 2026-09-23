@@ -141,7 +141,11 @@ jobs:
       # CRITICAL with no patch yet still fails -- if the base image cannot be fixed, that
       # is a decision to take explicitly, not one to let the scanner make quietly.
       - name: Scan image for CRITICAL vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@0.28.0
+        # Pinned to the commit of tag v0.28.0, not the tag: a security scanner is the last
+        # action whose code should be able to change under a moved tag. (The previous
+        # `@0.28.0` never resolved -- the tag has a `v` -- which went unnoticed until this
+        # job first ran, because the build before it had never gone green.)
+        uses: aquasecurity/trivy-action@915b19bbe73b92a6cf82a1bc12b087c9a19a5fe2 # v0.28.0
         with:
           image-ref: local/${{ matrix.service }}:ci
           format: table
