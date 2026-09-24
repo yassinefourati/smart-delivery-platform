@@ -1,0 +1,52 @@
+/* The cart: the items on the left, a summary box with the checkout button on the right. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  gap: var(--sdp-space-5);
+  align-items: start;
+}
+.items h1 {
+  margin-bottom: var(--sdp-space-4);
+}
+.table td {
+  vertical-align: middle;
+}
+.item {
+  display: flex;
+  align-items: center;
+  gap: var(--sdp-space-3);
+}
+.thumb {
+  width: 4.5rem;
+  flex: none;
+}
+.summary {
+  display: grid;
+  gap: var(--sdp-space-4);
+  position: sticky;
+  top: var(--sdp-space-4);
+}
+.total {
+  font-size: var(--sdp-text-lg);
+}
+.blockers {
+  padding-left: var(--sdp-space-6);
+  font-size: var(--sdp-text-sm);
+}
+.empty {
+  display: grid;
+  justify-items: start;
+  gap: var(--sdp-space-2);
+  max-width: 36rem;
+}
+@media (width < 52rem) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .summary {
+    position: static;
+  }
+  .thumb {
+    display: none;
+  }
+}

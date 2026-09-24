@@ -37,6 +37,10 @@
   padding: var(--sdp-space-5);
   box-shadow: var(--sdp-shadow-1);
 }
+.card > h2:first-child,
+.card > h3:first-child {
+  margin-top: 0;
+}
 
 .button {
   display: inline-flex;
@@ -44,18 +48,38 @@
   justify-content: center;
   gap: var(--sdp-space-2);
   min-height: 2.5rem;
-  padding: 0 var(--sdp-space-4);
+  padding: 0 var(--sdp-space-5);
   border: 1px solid var(--sdp-border-strong);
-  border-radius: var(--sdp-radius-md);
+  border-radius: var(--sdp-radius-pill);
   background: var(--sdp-bg-raised);
   color: var(--sdp-text);
   font: inherit;
+  font-size: var(--sdp-text-sm);
   font-weight: 600;
   cursor: pointer;
   text-decoration: none;
+  white-space: nowrap;
+  box-shadow: var(--sdp-shadow-1);
+  transition:
+    background-color var(--sdp-duration-fast) ease-out,
+    border-color var(--sdp-duration-fast) ease-out;
 }
 .button:hover {
   background: var(--sdp-bg-sunken);
+  color: var(--sdp-text);
+}
+/* Fills its container: the add-to-cart button on a product card and in the buy box. */
+.block {
+  width: 100%;
+}
+/* The "Added to cart" confirmation under the button: empty until it has something to say. */
+.addedNote {
+  color: var(--sdp-success);
+  font-weight: 600;
+}
+/* Stays in the page while empty: a live region must exist before it changes to be announced. */
+.addedNote:empty {
+  margin-top: calc(-1 * var(--sdp-space-3));
 }
 .button:disabled,
 .button[aria-disabled='true'] {
@@ -69,9 +93,15 @@
 }
 .primary:hover {
   background: var(--sdp-accent-hover);
+  border-color: var(--sdp-accent-hover);
+  color: var(--sdp-text-inverted);
 }
 .danger {
   border-color: var(--sdp-danger);
+  color: var(--sdp-danger);
+}
+.danger:hover {
+  background: var(--sdp-danger-subtle);
   color: var(--sdp-danger);
 }
 .linkButton {
@@ -91,13 +121,23 @@
 .table th,
 .table td {
   text-align: left;
-  padding: var(--sdp-space-2) var(--sdp-space-3);
+  padding: var(--sdp-space-3);
   border-bottom: 1px solid var(--sdp-border);
   vertical-align: top;
 }
-.table th {
-  font-size: var(--sdp-text-sm);
+.table thead th {
+  font-size: var(--sdp-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
   color: var(--sdp-text-muted);
+  font-weight: 600;
+  background: var(--sdp-bg-sunken);
+}
+.table tbody tr:last-child > * {
+  border-bottom: 0;
+}
+.table tbody th {
+  font-size: var(--sdp-text-sm);
   font-weight: 600;
 }
 .table caption {
@@ -112,26 +152,29 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* A left rule and a faint tint: the words carry the message, the colour only marks its kind. */
 .notice {
+  margin: 0;
   border-radius: var(--sdp-radius-md);
   padding: var(--sdp-space-3) var(--sdp-space-4);
-  border: 1px solid;
+  border: 1px solid var(--sdp-border);
+  border-left-width: 4px;
 }
 .info {
   background: var(--sdp-accent-subtle);
-  border-color: var(--sdp-accent);
+  border-left-color: var(--sdp-accent);
 }
 .warn {
   background: var(--sdp-warn-subtle);
-  border-color: var(--sdp-warn);
+  border-left-color: var(--sdp-warn);
 }
 .error {
   background: var(--sdp-danger-subtle);
-  border-color: var(--sdp-danger);
+  border-left-color: var(--sdp-danger);
 }
 .success {
   background: var(--sdp-success-subtle);
-  border-color: var(--sdp-success);
+  border-left-color: var(--sdp-success);
 }
 
 .field {
@@ -140,16 +183,24 @@
 }
 .field label {
   font-weight: 600;
+  font-size: var(--sdp-text-sm);
 }
 .field input,
 .field select,
 .field textarea {
   font: inherit;
+  min-height: 2.5rem;
   padding: var(--sdp-space-2) var(--sdp-space-3);
   border: 1px solid var(--sdp-border-strong);
-  border-radius: var(--sdp-radius-sm);
-  background: var(--sdp-bg);
+  border-radius: var(--sdp-radius-md);
+  background: var(--sdp-bg-raised);
   color: var(--sdp-text);
+  box-shadow: inset 0 1px 2px rgb(15 58 43 / 6%);
+}
+.field input:focus,
+.field select:focus,
+.field textarea:focus {
+  border-color: var(--sdp-accent);
 }
 .field input:not([type='checkbox']):not([type='radio']),
 .field select,
@@ -196,7 +247,8 @@
 }
 
 .dialog {
-  border: 1px solid var(--sdp-border-strong);
+  border: 1px solid var(--sdp-border);
+  box-shadow: var(--sdp-shadow-2);
   border-radius: var(--sdp-radius-lg);
   padding: var(--sdp-space-5);
   max-width: 32rem;

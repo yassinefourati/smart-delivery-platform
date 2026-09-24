@@ -1,59 +1,252 @@
+/*
+ * The storefront chrome: a deep green top bar with the search box in the middle, a lighter
+ * strip underneath for navigation, and a matching footer. Green here, white below it.
+ */
 .header {
-  border-bottom: 1px solid var(--sdp-border);
-  background: var(--sdp-bg-raised);
+  color: var(--sdp-chrome-text);
 }
-.bar {
+.header a {
+  color: inherit;
+  text-decoration: none;
+}
+
+/* ---- Top bar ---------------------------------------------------------------------- */
+.top {
+  background: var(--sdp-chrome);
+}
+.topInner {
   max-width: var(--sdp-content-max);
   margin: 0 auto;
-  padding: var(--sdp-space-3) var(--sdp-space-4);
+  padding: var(--sdp-space-2) var(--sdp-space-4);
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
   gap: var(--sdp-space-4);
 }
 .brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sdp-space-2);
   font-weight: 700;
-  text-decoration: none;
-  color: var(--sdp-text);
   font-size: var(--sdp-text-lg);
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  padding: var(--sdp-space-1) var(--sdp-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--sdp-radius-sm);
 }
-.nav {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sdp-space-3);
-  align-items: center;
-  flex: 1;
+.logo {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: var(--sdp-radius-md);
+  background: var(--sdp-chrome-text);
+  color: var(--sdp-chrome);
 }
-.nav a {
-  text-decoration: none;
-}
-.nav a[aria-current='page'] {
-  text-decoration: underline;
-  font-weight: 600;
-}
-.account {
-  display: flex;
-  gap: var(--sdp-space-3);
-  align-items: center;
-}
-.staff {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sdp-space-3);
-  font-size: var(--sdp-text-sm);
+.brand:hover,
+.topLink:hover,
+.cart:hover {
+  border-color: var(--sdp-chrome-muted);
 }
 
+/* ---- Search ----------------------------------------------------------------------- */
+.search {
+  flex: 1;
+  display: flex;
+  min-width: 0;
+  border-radius: var(--sdp-radius-md);
+  background: var(--sdp-bg-raised);
+  overflow: hidden;
+}
+.search:focus-within {
+  outline: 3px solid var(--sdp-chrome-muted);
+  outline-offset: 0;
+}
+.searchInput {
+  flex: 1;
+  min-width: 0;
+  min-height: 2.5rem;
+  border: 0;
+  padding: 0 var(--sdp-space-3);
+  background: transparent;
+  color: var(--sdp-text);
+}
+.searchInput:focus-visible {
+  outline: none; /* the whole search bar draws the ring, via :focus-within above */
+}
+.searchButton {
+  display: grid;
+  place-items: center;
+  width: 3rem;
+  border: 0;
+  background: var(--sdp-accent);
+  color: var(--sdp-text-inverted);
+  cursor: pointer;
+}
+.searchButton:hover {
+  background: var(--sdp-accent-hover);
+}
+
+/* ---- Account and cart ------------------------------------------------------------- */
+.account {
+  display: flex;
+  align-items: center;
+  gap: var(--sdp-space-1);
+}
+.topLink,
+.topButton,
+.cart {
+  display: grid;
+  line-height: 1.2;
+  padding: var(--sdp-space-1) var(--sdp-space-2);
+  border: 1px solid transparent;
+  border-radius: var(--sdp-radius-sm);
+  font-weight: 700;
+  font-size: var(--sdp-text-sm);
+  white-space: nowrap;
+}
+.topSmall {
+  font-weight: 400;
+  font-size: var(--sdp-text-xs);
+  color: var(--sdp-chrome-muted);
+}
+.topButton {
+  background: none;
+  color: inherit;
+  font-family: inherit;
+  cursor: pointer;
+  align-self: stretch;
+}
+.topButton:hover {
+  border-color: var(--sdp-chrome-muted);
+}
+.cart {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sdp-space-1);
+}
+.cartIcon {
+  position: relative;
+  display: inline-block;
+}
+.cartCount {
+  position: absolute;
+  top: -0.35rem;
+  left: 50%;
+  transform: translateX(-35%);
+  min-width: 1.25rem;
+  padding: 0 0.3rem;
+  border-radius: var(--sdp-radius-pill);
+  background: var(--sdp-chrome-text);
+  color: var(--sdp-chrome);
+  font-size: var(--sdp-text-xs);
+  font-weight: 700;
+  text-align: center;
+  line-height: 1.25rem;
+}
+.header a[aria-current='page'].topLink,
+.header a[aria-current='page'].cart {
+  border-color: var(--sdp-chrome-muted);
+}
+
+/* ---- Secondary strip -------------------------------------------------------------- */
+.sub {
+  background: var(--sdp-chrome-2);
+}
+.subInner {
+  max-width: var(--sdp-content-max);
+  margin: 0 auto;
+  padding: 0 var(--sdp-space-4);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0 var(--sdp-space-4);
+}
+.subNav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0 var(--sdp-space-1);
+  font-size: var(--sdp-text-sm);
+}
+.subNav a {
+  padding: var(--sdp-space-2) var(--sdp-space-2);
+  border-bottom: 2px solid transparent;
+}
+.subNav a:hover {
+  border-bottom-color: var(--sdp-chrome-muted);
+}
+.subNav a[aria-current='page'] {
+  border-bottom-color: var(--sdp-chrome-text);
+  font-weight: 600;
+}
+.staffLabel {
+  padding: 0 var(--sdp-space-2);
+  font-size: var(--sdp-text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--sdp-chrome-muted);
+}
+
+/* ---- Content and footer ----------------------------------------------------------- */
 .main {
+  flex: 1;
+  width: 100%;
   max-width: var(--sdp-content-max);
   margin: 0 auto;
   padding: var(--sdp-space-5) var(--sdp-space-4) var(--sdp-space-7);
   display: grid;
   gap: var(--sdp-space-4);
+  align-content: start;
 }
 .footer {
+  background: var(--sdp-chrome);
+  color: var(--sdp-chrome-muted);
+  font-size: var(--sdp-text-sm);
+}
+.footerInner {
   max-width: var(--sdp-content-max);
   margin: 0 auto;
-  padding: var(--sdp-space-4);
-  font-size: var(--sdp-text-sm);
-  color: var(--sdp-text-muted);
+  padding: var(--sdp-space-5) var(--sdp-space-4);
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: var(--sdp-space-3);
+}
+.footerBrand {
+  color: var(--sdp-chrome-text);
+  font-weight: 700;
+}
+.footer a {
+  color: var(--sdp-chrome-text);
+}
+
+/* ---- Narrow screens: search drops to its own row, as storefront apps do ------------ */
+@media (width < 52rem) {
+  .topInner {
+    flex-wrap: wrap;
+  }
+  .search {
+    order: 3;
+    flex-basis: 100%;
+  }
+  .account {
+    margin-left: auto;
+  }
+  .topSmall {
+    display: none;
+  }
+}
+@media (width < 30rem) {
+  .brand {
+    font-size: var(--sdp-text-md);
+    padding-left: 0;
+  }
+  .topInner {
+    gap: var(--sdp-space-2);
+  }
+  /* Room for the brand, Sign in and the cart on one line; the sign-in page links to Register. */
+  .register {
+    display: none;
+  }
 }

@@ -21,7 +21,7 @@ export function AddToCart({
   const [added, setAdded] = useState(false);
   const id = useId();
   return (
-    <div className={ui.row}>
+    <div className={ui.stack}>
       {compact ? null : (
         <span className={ui.field}>
           <label htmlFor={id}>Quantity</label>
@@ -40,13 +40,13 @@ export function AddToCart({
                 ),
               );
             }}
-            style={{ width: '5rem' }}
+            style={{ width: '6rem' }}
           />
         </span>
       )}
       <button
         type="button"
-        className={`${ui.button} ${ui.primary}`}
+        className={`${ui.button} ${ui.primary} ${ui.block}`}
         aria-label={`Add ${product.name} to cart`}
         onClick={() => {
           add(
@@ -63,7 +63,7 @@ export function AddToCart({
       >
         Add to cart
       </button>
-      <span role="status" className={ui.small}>
+      <span role="status" className={`${ui.small} ${ui.addedNote}`}>
         {added ? 'Added to cart' : ''}
       </span>
     </div>

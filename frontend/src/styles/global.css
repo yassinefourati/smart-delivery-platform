@@ -32,6 +32,13 @@ body {
   min-height: 100vh;
 }
 
+/* Header, content, footer: the footer stays at the bottom of the window on a short page. */
+#root {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
 h1,
 h2,
 h3,
@@ -89,6 +96,25 @@ select,
 textarea {
   font: inherit;
   color: inherit;
+}
+
+/*
+ * Inputs that are not inside a `ui.field` (the cart's quantity box, the sort menu) still look
+ * like the rest of the app. `:where()` keeps this at zero specificity, so any component class
+ * -- the header's borderless search box, for one -- wins without a fight.
+ */
+:where(input:not([type='checkbox'], [type='radio'], [type='range']), select, textarea) {
+  min-height: 2.25rem;
+  padding: 0 var(--sdp-space-2);
+  border: 1px solid var(--sdp-border-strong);
+  border-radius: var(--sdp-radius-md);
+  background: var(--sdp-bg-raised);
+}
+:where(textarea) {
+  padding: var(--sdp-space-2);
+}
+:where(input[type='checkbox'], input[type='radio']) {
+  accent-color: var(--sdp-accent);
 }
 
 img,

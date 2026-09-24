@@ -19,20 +19,31 @@
  */
 
 :root {
-  /* ---- Palette: light ------------------------------------------------------------- */
-  --sdp-bg: #ffffff;
-  --sdp-bg-raised: #f7f8fa;
-  --sdp-bg-sunken: #eef0f4;
-  --sdp-border: #d3d8e0;
-  --sdp-border-strong: #9aa3b2;
+  /* ---- Palette: light --------------------------------------------------------------
+   * Green and white, and very little else. The page sits on a faint green-grey so white
+   * cards read as surfaces (the way large storefronts separate content), and green is kept
+   * for the things a person acts on: the header, primary buttons, links and focus. Status
+   * colours below are the only other hues, and they only ever tint words.
+   */
+  --sdp-bg: #f4f7f5;
+  --sdp-bg-raised: #ffffff;
+  --sdp-bg-sunken: #e9efeb;
+  --sdp-border: #d9e1dc;
+  --sdp-border-strong: #9fada5;
 
-  --sdp-text: #14181f; /* 16.8:1 on --sdp-bg */
-  --sdp-text-muted: #545c6b; /* 7.3:1  on --sdp-bg */
+  --sdp-text: #121a16; /* 16.4:1 on --sdp-bg */
+  --sdp-text-muted: #56625b; /* 5.9:1  on --sdp-bg */
   --sdp-text-inverted: #ffffff;
 
-  --sdp-accent: #1f5bd7; /* 5.6:1  on --sdp-bg -- links, focus, primary action */
-  --sdp-accent-hover: #17469f;
-  --sdp-accent-subtle: #e8effc;
+  --sdp-accent: #1a7d4f; /* 5.1:1 on white, 4.8:1 on --sdp-bg -- links, focus, primary action */
+  --sdp-accent-hover: #136640;
+  --sdp-accent-subtle: #e6f3ec;
+
+  /* The header and footer: one deep green, one step lighter for the secondary strip. */
+  --sdp-chrome: #0f3a2b;
+  --sdp-chrome-2: #175240;
+  --sdp-chrome-text: #ffffff; /* 12.6:1 on --sdp-chrome */
+  --sdp-chrome-muted: #c4dccf; /* 8.7:1 on --sdp-chrome */
 
   /*
    * Status colours. `danger` is reserved for something that FAILED or cannot proceed;
@@ -41,14 +52,14 @@
    * a user waiting and a user placing a SECOND order is the wording and the colour on that
    * screen.
    */
-  --sdp-danger: #b3261e; /* 6.0:1 on --sdp-bg */
+  --sdp-danger: #b3261e; /* 6.0:1 on white */
   --sdp-danger-subtle: #fdeceb;
-  --sdp-warn: #8a5300; /* 5.1:1 on --sdp-bg -- not the #f5a623 that fails contrast */
+  --sdp-warn: #8a5300; /* 6.3:1 on white -- not the #f5a623 that fails contrast */
   --sdp-warn-subtle: #fdf3e2;
-  --sdp-success: #15653a; /* 6.4:1 on --sdp-bg */
-  --sdp-success-subtle: #e7f4ec;
-  --sdp-pending: #545c6b; /* deliberately neutral: a *_PENDING state is not good news yet */
-  --sdp-pending-subtle: #eef0f4;
+  --sdp-success: #1a7d4f; /* the brand green: "done" and "go" are the same idea here */
+  --sdp-success-subtle: #e6f3ec;
+  --sdp-pending: #56625b; /* deliberately neutral: a *_PENDING state is not good news yet */
+  --sdp-pending-subtle: #e9efeb;
 
   /* ---- Type --------------------------------------------------------------------- */
   --sdp-font-sans:
@@ -81,9 +92,10 @@
   /* ---- Shape and elevation ------------------------------------------------------ */
   --sdp-radius-sm: 4px;
   --sdp-radius-md: 8px;
-  --sdp-radius-lg: 12px;
-  --sdp-shadow-1: 0 1px 2px rgb(20 24 31 / 8%);
-  --sdp-shadow-2: 0 4px 16px rgb(20 24 31 / 12%);
+  --sdp-radius-lg: 10px;
+  --sdp-radius-pill: 999px;
+  --sdp-shadow-1: 0 1px 2px rgb(15 58 43 / 6%);
+  --sdp-shadow-2: 0 6px 20px rgb(15 58 43 / 12%);
 
   /* ---- Focus: a token, because the ring must never be removed, only restyled ---- */
   --sdp-focus-ring: 2px solid var(--sdp-accent);
@@ -95,7 +107,7 @@
   --sdp-duration-slow: 240ms;
 
   /* ---- Layout ------------------------------------------------------------------- */
-  --sdp-content-max: 72rem;
+  --sdp-content-max: 80rem;
   --sdp-z-dialog: 100;
 
   color-scheme: light dark;
@@ -103,31 +115,36 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --sdp-bg: #12151b;
-    --sdp-bg-raised: #1b1f27;
-    --sdp-bg-sunken: #0d1015;
-    --sdp-border: #333a46;
-    --sdp-border-strong: #5c6675;
+    --sdp-bg: #0f1512;
+    --sdp-bg-raised: #172019;
+    --sdp-bg-sunken: #0b100d;
+    --sdp-border: #2c3a32;
+    --sdp-border-strong: #56685d;
 
-    --sdp-text: #eef1f6; /* 15.1:1 on --sdp-bg */
-    --sdp-text-muted: #a8b1bf; /* 7.6:1  on --sdp-bg */
-    --sdp-text-inverted: #12151b;
+    --sdp-text: #edf3ef; /* 16.4:1 on --sdp-bg */
+    --sdp-text-muted: #a9b8af; /* 8.9:1  on --sdp-bg */
+    --sdp-text-inverted: #0f1512;
 
-    --sdp-accent: #7fa9ff; /* 7.2:1 on --sdp-bg -- a dark scheme needs a LIGHTER accent */
-    --sdp-accent-hover: #a6c3ff;
-    --sdp-accent-subtle: #1d2740;
+    --sdp-accent: #6fcf9a; /* 9.7:1 on --sdp-bg -- a dark scheme needs a LIGHTER accent */
+    --sdp-accent-hover: #95dcb4;
+    --sdp-accent-subtle: #16301f;
+
+    --sdp-chrome: #0a2419;
+    --sdp-chrome-2: #103325;
+    --sdp-chrome-text: #edf3ef;
+    --sdp-chrome-muted: #a9c9b7;
 
     --sdp-danger: #ff9d95;
     --sdp-danger-subtle: #3a1c19;
     --sdp-warn: #e8b872;
     --sdp-warn-subtle: #3a2c14;
-    --sdp-success: #7fd3a1;
-    --sdp-success-subtle: #14301f;
-    --sdp-pending: #a8b1bf;
-    --sdp-pending-subtle: #242a34;
+    --sdp-success: #6fcf9a;
+    --sdp-success-subtle: #16301f;
+    --sdp-pending: #a9b8af;
+    --sdp-pending-subtle: #1f2a23;
 
     --sdp-shadow-1: 0 1px 2px rgb(0 0 0 / 40%);
-    --sdp-shadow-2: 0 4px 16px rgb(0 0 0 / 55%);
+    --sdp-shadow-2: 0 6px 20px rgb(0 0 0 / 55%);
   }
 }
 

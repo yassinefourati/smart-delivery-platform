@@ -1,7 +1,9 @@
 import styles from './catalog.module.css';
 
 /**
- * A deterministic lettered tile keyed off the SKU, in a fixed aspect-ratio box.
+ * A calm lettered tile in a fixed aspect-ratio box: the product's initials on a white disc,
+ * on the same pale green-grey for every product, so the grid reads as one catalog rather
+ * than a wall of colours.
  *
  * NO <img> FROM `imageUrl`, on purpose: the field is an arbitrary absolute URL an admin typed
  * (null on every seeded product, no upload endpoint, no validation). The CSP is
@@ -9,10 +11,7 @@ import styles from './catalog.module.css';
  * leak our page URLs to whatever host was pasted. The tile means the common case is the good
  * case and a missing image never reflows the grid.
  */
-export function ProductArt({ sku, name }: { sku: string; name: string }) {
-  let hash = 0;
-  for (const ch of sku) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
-  const hue = hash % 360;
+export function ProductArt({ name }: { sku: string; name: string }) {
   const letters = name
     .split(/\s+/)
     .filter(Boolean)
@@ -20,8 +19,8 @@ export function ProductArt({ sku, name }: { sku: string; name: string }) {
     .map((w) => w[0]?.toUpperCase() ?? '')
     .join('');
   return (
-    <div className={styles.art} style={{ background: `hsl(${hue} 45% 42%)` }} aria-hidden="true">
-      {letters || '?'}
+    <div className={styles.art} aria-hidden="true">
+      <span className={styles.artMark}>{letters || '?'}</span>
     </div>
   );
 }

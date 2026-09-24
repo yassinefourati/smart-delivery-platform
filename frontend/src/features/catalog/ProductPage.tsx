@@ -28,27 +28,51 @@ export function ProductPage() {
   const p = product.data;
   return (
     <section className={ui.page}>
-      <p>
+      <nav aria-label="Breadcrumb" className={styles.crumbs}>
         <Link to="/">Back to the shop</Link>
-      </p>
+        {p.categoryId && p.categoryName ? (
+          <>
+            <span aria-hidden="true">›</span>
+            <Link to={`/?categoryId=${p.categoryId}`}>{p.categoryName}</Link>
+          </>
+        ) : null}
+      </nav>
       <div className={styles.detail}>
-        <ProductArt sku={p.sku} name={p.name} />
-        <div className={ui.stack}>
+        <div className={styles.detailArt}>
+          <ProductArt sku={p.sku} name={p.name} />
+        </div>
+        <div className={styles.detailInfo}>
           <PageHeading title={p.name}>{p.name}</PageHeading>
-          <span className={ui.muted}>
+          <span className={`${ui.muted} ${ui.small}`}>
             {p.categoryName ?? 'Uncategorised'} - SKU <span className={ui.mono}>{p.sku}</span>
           </span>
-          <span className={styles.price}>{formatMoney(p.price)}</span>
-          {p.description ? <p>{p.description}</p> : null}
+          <hr />
+          {p.description ? (
+            <>
+              <h2 className={styles.aboutHeading}>About this item</h2>
+              <p>{p.description}</p>
+            </>
+          ) : (
+            <p className={ui.muted}>No description yet.</p>
+          )}
+        </div>
+        <aside className={styles.buyBox} aria-label="Buy this product">
+          <span className={styles.buyPrice}>{formatMoney(p.price)}</span>
           {p.active ? (
             <>
               <StockLine productId={p.id} />
               <AddToCart product={p} />
+              <dl className={styles.buyMeta}>
+                <dt>Ships from</dt>
+                <dd>Smart Delivery warehouses</dd>
+                <dt>Tracking</dt>
+                <dd>Every step, from payment to delivery</dd>
+              </dl>
             </>
           ) : (
             <p className={`${ui.notice} ${ui.info}`}>This product is not currently sold.</p>
           )}
-        </div>
+        </aside>
       </div>
     </section>
   );

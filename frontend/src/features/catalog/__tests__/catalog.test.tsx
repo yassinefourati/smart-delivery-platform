@@ -36,13 +36,22 @@ describe('the catalog', () => {
   it('keeps filters in the URL, so they are linkable and Back restores them', async () => {
     const { router } = renderApp('/');
     await screen.findAllByRole('link', { name: 'Smoke Widget' });
+    // Search lives in the header, on every page, and lands on the catalog with ?search=.
     await userEvent.type(screen.getByLabelText('Search'), 'widget');
-    await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit search' }));
     await waitFor(() => expect(router.state.location.search).toBe('?search=widget'));
     await waitFor(() => expect(productQueries.at(-1)).toContain('search=widget'));
     await router.navigate(-1);
     await waitFor(() => expect(router.state.location.search).toBe(''));
     await waitFor(() => expect(screen.getByLabelText('Search')).toHaveValue(''));
+  });
+
+  it('keeps the search when a price filter is applied from the sidebar', async () => {
+    const { router } = renderApp('/?search=widget');
+    await screen.findAllByRole('link', { name: 'Smoke Widget' });
+    await userEvent.type(screen.getByLabelText('Max price'), '50');
+    await userEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(router.state.location.search).toBe('?search=widget&maxPrice=50'));
   });
 });
 

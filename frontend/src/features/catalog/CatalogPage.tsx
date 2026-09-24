@@ -43,6 +43,23 @@ export function queryFromParams(params: URLSearchParams): ProductListQuery {
   };
 }
 
+/**
+ * The current filters with one key set (or removed), back on page one: keeping page 4 of a
+ * different result set is a blank page.
+ */
+function withParam(params: URLSearchParams, key: string, value: string | null): URLSearchParams {
+  const next = new URLSearchParams(params);
+  if (value) next.set(key, value);
+  else next.delete(key);
+  next.delete('page');
+  return next;
+}
+
+function hrefFor(params: URLSearchParams): string {
+  const qs = params.toString();
+  return qs ? `/?${qs}` : '/';
+}
+
 export function CatalogPage() {
   const [params, setParams] = useSearchParams();
   const query = queryFromParams(params);
@@ -61,14 +78,11 @@ export function CatalogPage() {
     staleTime: STALE_TIME.CATEGORIES,
   });
 
-  const applyFilters = (form: HTMLFormElement) => {
+  /** The price form keeps every other filter (search, department, sort). */
+  const applyPrice = (form: HTMLFormElement) => {
     const data = new FormData(form);
-    const next = new URLSearchParams();
-    for (const key of ['search', 'categoryId', 'minPrice', 'maxPrice', 'sort']) {
-      const value = formText(data, key);
-      if (value) next.set(key, value);
-    }
-    // A new filter starts at page one; keeping page 4 of a different result set is a blank page.
+    let next = params;
+    for (const key of ['minPrice', 'maxPrice']) next = withParam(next, key, formText(data, key));
     setParams(next);
   };
 
@@ -79,123 +93,165 @@ export function CatalogPage() {
     setParams(next);
   };
 
+  const categoryName = categories.data?.find((c) => c.id === query.categoryId)?.name;
+  const heading = query.search
+    ? `Results for "${query.search}"`
+    : (categoryName ?? (query.categoryId ? 'Products' : 'All products'));
+  const filtered = params.toString() !== '';
+
   return (
-    <section className={ui.page}>
-      <PageHeading title="Shop">Shop</PageHeading>
-      <form
-        id={formId}
-        role="search"
-        aria-label="Filter products"
-        className={styles.filters}
-        // `key` resets the uncontrolled inputs when the URL changes underneath them (Back).
-        key={params.toString()}
-        onSubmit={(e) => {
-          e.preventDefault();
-          applyFilters(e.currentTarget);
-        }}
-      >
-        <div className={ui.field}>
-          <label htmlFor={`${formId}-search`}>Search</label>
-          <input
-            id={`${formId}-search`}
-            name="search"
-            type="search"
-            defaultValue={query.search ?? ''}
-          />
-        </div>
-        <div className={ui.field}>
-          <label htmlFor={`${formId}-category`}>Category</label>
-          <select id={`${formId}-category`} name="categoryId" defaultValue={query.categoryId ?? ''}>
-            <option value="">All categories</option>
-            {categories.data?.map((c) => (
-              <option key={c.id} value={c.id}>
+    <div className={styles.layout}>
+      <aside className={styles.sidebar} aria-label="Filters">
+        <h2 className={styles.sideHeading}>Department</h2>
+        <ul className={styles.deptList}>
+          <li>
+            <Link
+              to={hrefFor(withParam(params, 'categoryId', null))}
+              aria-current={query.categoryId ? undefined : 'true'}
+            >
+              All products
+            </Link>
+          </li>
+          {categories.data?.map((c) => (
+            <li key={c.id}>
+              <Link
+                to={hrefFor(withParam(params, 'categoryId', c.id))}
+                aria-current={query.categoryId === c.id ? 'true' : undefined}
+              >
                 {c.name}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className={ui.field}>
-          <label htmlFor={`${formId}-min`}>Min price</label>
-          <input
-            id={`${formId}-min`}
-            name="minPrice"
-            type="number"
-            min="0"
-            step="0.01"
-            defaultValue={query.minPrice ?? ''}
-          />
-        </div>
-        <div className={ui.field}>
-          <label htmlFor={`${formId}-max`}>Max price</label>
-          <input
-            id={`${formId}-max`}
-            name="maxPrice"
-            type="number"
-            min="0"
-            step="0.01"
-            defaultValue={query.maxPrice ?? ''}
-          />
-        </div>
-        <div className={ui.field}>
-          <label htmlFor={`${formId}-sort`}>Sort</label>
-          <select id={`${formId}-sort`} name="sort" defaultValue={query.sort ?? ''}>
-            {SORTS.map((s) => (
-              <option key={s.value} value={s.value}>
-                {s.label}
-              </option>
-            ))}
-          </select>
-        </div>
-        <div className={ui.row}>
-          <button type="submit" className={`${ui.button} ${ui.primary}`}>
+              </Link>
+            </li>
+          ))}
+        </ul>
+
+        <h2 className={styles.sideHeading}>Price</h2>
+        <form
+          aria-label="Filter by price"
+          className={styles.priceForm}
+          // `key` resets the uncontrolled inputs when the URL changes underneath them (Back).
+          key={params.toString()}
+          onSubmit={(e) => {
+            e.preventDefault();
+            applyPrice(e.currentTarget);
+          }}
+        >
+          <div className={styles.priceInputs}>
+            <div className={ui.field}>
+              <label htmlFor={`${formId}-min`}>Min price</label>
+              <input
+                id={`${formId}-min`}
+                name="minPrice"
+                type="number"
+                min="0"
+                step="0.01"
+                defaultValue={query.minPrice ?? ''}
+              />
+            </div>
+            <div className={ui.field}>
+              <label htmlFor={`${formId}-max`}>Max price</label>
+              <input
+                id={`${formId}-max`}
+                name="maxPrice"
+                type="number"
+                min="0"
+                step="0.01"
+                defaultValue={query.maxPrice ?? ''}
+              />
+            </div>
+          </div>
+          <button type="submit" className={ui.button}>
             Apply
           </button>
-          {params.toString() ? (
-            <button
-              type="button"
-              className={ui.button}
-              onClick={() => setParams(new URLSearchParams())}
-            >
-              Clear
-            </button>
-          ) : null}
-        </div>
-      </form>
+        </form>
+        {filtered ? (
+          <button
+            type="button"
+            className={ui.linkButton}
+            onClick={() => setParams(new URLSearchParams())}
+          >
+            Clear all filters
+          </button>
+        ) : null}
+      </aside>
 
-      {products.isPending ? (
-        <Loading label="Loading products" lines={4} />
-      ) : products.isError ? (
-        <ProblemView error={products.error} onRetry={() => void products.refetch()} />
-      ) : products.data.content.length === 0 ? (
-        <p>No products match these filters.</p>
-      ) : (
-        <>
-          <p className={`${ui.muted} ${ui.small}`} aria-live="polite">
-            {products.data.totalElements} product{products.data.totalElements === 1 ? '' : 's'}
-            {products.isPlaceholderData ? ' (updating...)' : ''}
-          </p>
-          <ul className={styles.grid} aria-busy={products.isPlaceholderData}>
-            {products.data.content.map((p) => (
-              <li key={p.id} className={styles.tile}>
-                <ProductArt sku={p.sku} name={p.name} />
-                <Link to={`/products/${p.id}`}>{p.name}</Link>
-                <span className={ui.muted}>{p.categoryName ?? ''}</span>
-                <span className={styles.price}>{formatMoney(p.price)}</span>
-                {p.active ? (
-                  <AddToCart product={p} compact />
-                ) : (
-                  <span className={ui.muted}>Not currently sold</span>
-                )}
-              </li>
-            ))}
-          </ul>
-          <Pagination
-            page={products.data.page}
-            totalPages={products.data.totalPages}
-            onPage={goToPage}
-          />
-        </>
-      )}
-    </section>
+      <section className={styles.results}>
+        {filtered ? null : (
+          <div className={styles.hero}>
+            <p className={styles.heroEyebrow}>Smart Delivery</p>
+            <p className={styles.heroTitle}>Everyday essentials, delivered from our warehouses</p>
+            <p className={styles.heroText}>
+              Live stock on every product, and every order tracked from payment to your door.
+            </p>
+          </div>
+        )}
+        <div className={styles.resultsBar}>
+          <div>
+            <PageHeading title="Shop">{heading}</PageHeading>
+            {products.data ? (
+              <p className={`${ui.muted} ${ui.small}`} aria-live="polite">
+                {products.data.totalElements} product
+                {products.data.totalElements === 1 ? '' : 's'}
+                {products.isPlaceholderData ? ' (updating...)' : ''}
+              </p>
+            ) : null}
+          </div>
+          <div className={styles.sort}>
+            <label htmlFor={`${formId}-sort`}>Sort by</label>
+            <select
+              id={`${formId}-sort`}
+              value={query.sort ?? ''}
+              onChange={(e) => setParams(withParam(params, 'sort', e.target.value))}
+            >
+              {SORTS.map((s) => (
+                <option key={s.value} value={s.value}>
+                  {s.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+
+        {products.isPending ? (
+          <Loading label="Loading products" lines={4} />
+        ) : products.isError ? (
+          <ProblemView error={products.error} onRetry={() => void products.refetch()} />
+        ) : products.data.content.length === 0 ? (
+          <div className={styles.empty}>
+            <p>No products match these filters.</p>
+            <Link to="/">See all products</Link>
+          </div>
+        ) : (
+          <>
+            <ul className={styles.grid} aria-busy={products.isPlaceholderData}>
+              {products.data.content.map((p) => (
+                <li key={p.id} className={styles.tile}>
+                  <ProductArt sku={p.sku} name={p.name} />
+                  <div className={styles.tileBody}>
+                    {/* Stretched over the whole card by .tileLink::after, so the card is the target. */}
+                    <Link to={`/products/${p.id}`} className={styles.tileLink}>
+                      {p.name}
+                    </Link>
+                    <span className={`${ui.muted} ${ui.small}`}>{p.categoryName ?? ''}</span>
+                    <span className={styles.price}>{formatMoney(p.price)}</span>
+                  </div>
+                  <div className={styles.tileAction}>
+                    {p.active ? (
+                      <AddToCart product={p} compact />
+                    ) : (
+                      <span className={`${ui.muted} ${ui.small}`}>Not currently sold</span>
+                    )}
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <Pagination
+              page={products.data.page}
+              totalPages={products.data.totalPages}
+              onPage={goToPage}
+            />
+          </>
+        )}
+      </section>
+    </div>
   );
 }
