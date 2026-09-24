@@ -55,6 +55,7 @@ import {
 import type {
   AddressRequest,
   AddressResponse,
+  HumanRole,
   LoginRequest,
   LoginResponse,
   RegisterUserRequest,
@@ -146,10 +147,8 @@ export async function login(body: LoginRequest): Promise<LoginResponse> {
 }
 
 /**
- * Registration. ALWAYS grants `["CUSTOMER"]` -- verified live, and there is no endpoint anywhere
- * in this API that grants any other role. WAREHOUSE_MANAGER and DELIVERY_AGENT arrive by direct
- * database insert or out-of-band provisioning, which is why the guards for their screens are
- * correct against the code and cannot be exercised end to end.
+ * Registration. ALWAYS grants `["CUSTOMER"]`. Every other role is granted afterwards by an admin,
+ * through `grantRole` below.
  *
  * Returns 201. A duplicate email returns 409 `EMAIL_ALREADY_EXISTS` -- its own code, so the form
  * can put the error on the email field and offer "sign in instead" rather than showing a generic
@@ -173,11 +172,54 @@ export async function getUser(userId: string, options?: CallOptions): Promise<Us
 
 /**
  * `UpdateUserRequest` carries firstName, lastName and phoneNumber. That is the entire editable
- * surface of a user -- no email change, no password change, no role change, anywhere in this API.
+ * surface of a user's profile -- no email or password change. Roles have their own endpoints.
  */
 export async function updateUser(userId: string, body: UpdateUserRequest): Promise<UserResponse> {
   return request(
     { method: 'PUT', pathTemplate: '/api/v1/users/:userId', params: { userId }, body },
+    userResponseSchema,
+  );
+}
+
+/**
+ * ADMIN only. The one way to find a user without already holding their id: there is still no
+ * user list. An unknown email is a 404.
+ */
+export async function lookupUserByEmail(
+  email: string,
+  options?: CallOptions,
+): Promise<UserResponse> {
+  return request(
+    {
+      method: 'GET',
+      pathTemplate: '/api/v1/users/lookup',
+      query: { email },
+      signal: options?.signal,
+    },
+    userResponseSchema,
+  );
+}
+
+/**
+ * ADMIN only, and idempotent both ways: granting a held role, or revoking one the user does not
+ * have, answers 200 with the unchanged user. Roles travel in the JWT, so the change reaches the
+ * user at their next sign-in -- and a revoked role keeps working until their current token
+ * expires. Revoking your own ADMIN is a 409 `CANNOT_REVOKE_OWN_ADMIN`.
+ */
+export async function grantRole(userId: string, role: HumanRole): Promise<UserResponse> {
+  return request(
+    { method: 'PUT', pathTemplate: '/api/v1/users/:userId/roles/:role', params: { userId, role } },
+    userResponseSchema,
+  );
+}
+
+export async function revokeRole(userId: string, role: HumanRole): Promise<UserResponse> {
+  return request(
+    {
+      method: 'DELETE',
+      pathTemplate: '/api/v1/users/:userId/roles/:role',
+      params: { userId, role },
+    },
     userResponseSchema,
   );
 }

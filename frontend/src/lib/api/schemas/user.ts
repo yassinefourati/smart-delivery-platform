@@ -120,10 +120,9 @@ export type UpdateUserRequest = z.infer<typeof updateUserRequestSchema>;
  * every `phone ?? '--'` in the UI would still work by accident, while a genuine future switch
  * to omitting the key would go unnoticed. Say what the wire does.
  *
- * Registration ALWAYS grants `["CUSTOMER"]` (verified). No endpoint in this API grants any
- * other role, `UpdateUserRequest` carries only the three fields above, and there is no user
- * list or search -- only `GET /api/v1/users/{id}`. That is why this client has no admin user
- * management and no role-granting screen: there is no API to call.
+ * Registration ALWAYS grants `["CUSTOMER"]` (verified). Other roles are granted by an admin
+ * through `PUT /api/v1/users/{id}/roles/{role}`, on the admin Users page. There is still no user
+ * list -- only lookup by id or by exact email.
  */
 export const userResponseSchema = z.object({
   id: idSchema,

@@ -23,9 +23,9 @@
 #
 # Needs: a running platform (docker compose up -d), curl and jq.
 #
-# What it deliberately does NOT create: delivery agents. An agent must be linked to a user
-# holding DELIVERY_AGENT, and no endpoint can grant that role (docs/frontend.md), so orders
-# stop at "waiting for a courier" until an admin assigns one by hand.
+# What it deliberately does NOT create: delivery agents. Orders stop at "waiting for a
+# courier" until an admin grants a user DELIVERY_AGENT (Users page), creates their agent
+# profile (Agents page) and assigns the shipment -- see docs/local-development.md.
 set -Eeuo pipefail
 
 GATEWAY="${GATEWAY:-http://localhost:8080}"

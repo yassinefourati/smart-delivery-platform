@@ -120,6 +120,10 @@ public class User {
         this.roles.add(role);
     }
 
+    public void removeRole(RoleName roleName) {
+        this.roles.removeIf(role -> role.getName() == roleName);
+    }
+
     public Instant getCreatedAt() {
         return createdAt;
     }

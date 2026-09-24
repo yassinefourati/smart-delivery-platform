@@ -308,6 +308,99 @@ class UserApiIntegrationTest {
                 .andExpect(status().isForbidden());
     }
 
+    // --- Role management: the only way to a role other than CUSTOMER -------------------
+
+    @Test
+    void adminFindsAUserByEmail() throws Exception {
+        String email = uniqueEmail();
+        UUID userId = registerUser(email, "password123");
+
+        mockMvc.perform(get("/api/v1/users/lookup").param("email", email)
+                        .header("Authorization", "Bearer " + adminToken()))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(userId.toString()));
+    }
+
+    @Test
+    void lookingUpAnUnknownEmailReturns404() throws Exception {
+        mockMvc.perform(get("/api/v1/users/lookup").param("email", uniqueEmail())
+                        .header("Authorization", "Bearer " + adminToken()))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("NOT_FOUND"));
+    }
+
+    @Test
+    void aCustomerCannotLookUpUsersOrGrantRoles() throws Exception {
+        String myEmail = uniqueEmail();
+        UUID myId = registerUser(myEmail, "password123");
+        String myToken = login(myEmail, "password123");
+
+        mockMvc.perform(get("/api/v1/users/lookup").param("email", myEmail)
+                        .header("Authorization", "Bearer " + myToken))
+                .andExpect(status().isForbidden());
+        // Least of all to themselves.
+        mockMvc.perform(put("/api/v1/users/{id}/roles/{role}", myId, "ADMIN")
+                        .header("Authorization", "Bearer " + myToken))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void aGrantedRoleIsInTheUsersNextToken() throws Exception {
+        String email = uniqueEmail();
+        UUID userId = registerUser(email, "password123");
+        String adminToken = adminToken();
+
+        mockMvc.perform(put("/api/v1/users/{id}/roles/{role}", userId, "DELIVERY_AGENT")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.roles.length()").value(2));
+        // Granting it again is a no-op, not an error.
+        mockMvc.perform(put("/api/v1/users/{id}/roles/{role}", userId, "DELIVERY_AGENT")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.roles.length()").value(2));
+
+        org.assertj.core.api.Assertions.assertThat(
+                        SignedJWT.parse(login(email, "password123")).getJWTClaimsSet().getStringListClaim("roles"))
+                .containsExactlyInAnyOrder("CUSTOMER", "DELIVERY_AGENT");
+    }
+
+    @Test
+    void aRevokedRoleIsGoneFromTheUser() throws Exception {
+        UUID userId = registerUser(uniqueEmail(), "password123");
+        String adminToken = adminToken();
+        mockMvc.perform(put("/api/v1/users/{id}/roles/{role}", userId, "WAREHOUSE_MANAGER")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk());
+
+        mockMvc.perform(delete("/api/v1/users/{id}/roles/{role}", userId, "WAREHOUSE_MANAGER")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.roles.length()").value(1))
+                .andExpect(jsonPath("$.roles[0]").value("CUSTOMER"));
+    }
+
+    @Test
+    void anUnknownRoleIsA400() throws Exception {
+        UUID userId = registerUser(uniqueEmail(), "password123");
+
+        mockMvc.perform(put("/api/v1/users/{id}/roles/{role}", userId, "SUPERUSER")
+                        .header("Authorization", "Bearer " + adminToken()))
+                .andExpect(status().isBadRequest());
+    }
+
+    /** Otherwise the last admin could remove administration from the platform in one click. */
+    @Test
+    void anAdminCannotRevokeTheirOwnAdminRole() throws Exception {
+        String adminToken = adminToken();
+        UUID adminId = UUID.fromString(SignedJWT.parse(adminToken).getJWTClaimsSet().getSubject());
+
+        mockMvc.perform(delete("/api/v1/users/{id}/roles/{role}", adminId, "ADMIN")
+                        .header("Authorization", "Bearer " + adminToken))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.error").value("CANNOT_REVOKE_OWN_ADMIN"));
+    }
+
     // --- Phase 16: asymmetric signing, JWKS, and client credentials (ADR 007) ---------
 
     /**

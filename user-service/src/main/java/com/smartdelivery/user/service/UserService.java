@@ -5,7 +5,9 @@ import com.smartdelivery.user.domain.RoleName;
 import com.smartdelivery.user.domain.User;
 import com.smartdelivery.user.dto.RegisterUserRequest;
 import com.smartdelivery.user.dto.UpdateUserRequest;
+import com.smartdelivery.user.exception.CannotRevokeOwnAdminException;
 import com.smartdelivery.user.exception.EmailAlreadyExistsException;
+import com.smartdelivery.user.exception.UserEmailNotFoundException;
 import com.smartdelivery.user.exception.UserNotFoundException;
 import com.smartdelivery.user.repository.RoleRepository;
 import com.smartdelivery.user.repository.UserRepository;
@@ -59,6 +61,38 @@ public class UserService {
         user.setFirstName(request.firstName());
         user.setLastName(request.lastName());
         user.setPhoneNumber(request.phoneNumber());
+        return user;
+    }
+
+    @Transactional(readOnly = true)
+    public User getByEmail(String email) {
+        return userRepository.findByEmail(email.trim()).orElseThrow(() -> new UserEmailNotFoundException(email));
+    }
+
+    /**
+     * Idempotent: granting a role the user already holds changes nothing. The new role is in
+     * the user's token from their next sign-in, not before -- roles travel in the JWT.
+     */
+    @Transactional
+    public User grantRole(UUID id, RoleName roleName) {
+        User user = getById(id);
+        Role role = roleRepository.findByName(roleName)
+                .orElseThrow(() -> new IllegalStateException(roleName + " role is not seeded"));
+        user.addRole(role);
+        return user;
+    }
+
+    /**
+     * Idempotent, like {@link #grantRole}. A revoked role keeps working until the user's
+     * current token expires, because resource servers trust the roles in the token.
+     */
+    @Transactional
+    public User revokeRole(UUID id, RoleName roleName, UUID actingUserId) {
+        if (roleName == RoleName.ADMIN && id.equals(actingUserId)) {
+            throw new CannotRevokeOwnAdminException();
+        }
+        User user = getById(id);
+        user.removeRole(roleName);
         return user;
     }
 }

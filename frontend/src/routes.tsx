@@ -8,6 +8,7 @@ import { accountRoutes, publicAccountRoutes } from './features/account/routes';
 import { adminCatalogRoutes } from './features/admin/catalog/routes';
 import { adminDispatchRoutes } from './features/admin/dispatch/routes';
 import { adminStockRoutes } from './features/admin/stock/routes';
+import { adminUserRoutes } from './features/admin/users/routes';
 import { agentRoutes } from './features/agent/routes';
 import { cartRoutes } from './features/cart/routes';
 import { catalogRoutes } from './features/catalog/routes';
@@ -60,7 +61,7 @@ export const appRoutes: RouteObject[] = [
             <Outlet />
           </RequireRole>
         ),
-        children: [...adminCatalogRoutes, ...adminDispatchRoutes],
+        children: [...adminCatalogRoutes, ...adminDispatchRoutes, ...adminUserRoutes],
       },
       {
         // inventory-service's MANAGED_ROLES: gating on ADMIN alone would lock a warehouse

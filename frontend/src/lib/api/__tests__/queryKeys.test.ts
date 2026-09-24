@@ -133,8 +133,8 @@ describe('every factory', () => {
     expect(new Set(serialised).size).toBe(serialised.length);
   });
 
-  it('exposes exactly the six groups the app has', () => {
-    // A seventh group means a new backend service or a new persona, and both are decisions worth
+  it('exposes exactly the seven groups the app has', () => {
+    // An eighth group means a new backend service or a new persona, and both are decisions worth
     // noticing in a diff rather than discovering in a cache.
     expect(Object.keys(queryKeys).sort()).toEqual([
       'account',
@@ -143,6 +143,7 @@ describe('every factory', () => {
       'dispatch',
       'inventory',
       'orders',
+      'users',
     ]);
   });
 });

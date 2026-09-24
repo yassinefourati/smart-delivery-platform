@@ -221,15 +221,20 @@ designed around:
   product's first stock row in a warehouse and says that quantities cannot be changed
   afterwards; a duplicate gets that sentence, not a generic 409.
 - **Shipments and agents** (ADMIN). Assigning an agent is what sends an order out, and
-  the dialog says so. Creating an agent takes a pasted user id: there is no user search.
+  the dialog says so. Creating an agent takes a user id, which the Users page links in.
+- **Users and roles** (ADMIN). Look a user up by exact email, then grant or revoke any
+  role. It is how a user becomes a `DELIVERY_AGENT` or `WAREHOUSE_MANAGER`: registration
+  only ever grants `CUSTOMER`. Changes reach the user at their next sign-in, because roles
+  travel in the JWT, and a revoked role works until the current token expires. An admin
+  cannot revoke their own `ADMIN` (the server answers 409), so the last admin cannot lock
+  everyone out. It is still a lookup, not a user list.
 - **Order lookup** (ADMIN). A lookup by order id or customer id, with payment and
   shipment state -- deliberately **not** an order list. There is no all-orders endpoint,
   and building one from shipments would silently omit every failed or stuck order, which
   are the ones an admin needs. The page says so and names the endpoint that would fix it.
 - **Deliveries** (DELIVERY_AGENT or ADMIN). A worklist and a Mark as delivered button,
   and a line saying addresses are not available: `DeliveryResponse` has no order or
-  address, and agents cannot read shipments. No endpoint can grant `DELIVERY_AGENT`, so
-  this surface could not be exercised end to end.
+  address, and agents cannot read shipments.
 
 ## Deliberately not built
 
@@ -239,7 +244,7 @@ designed around:
   compensation (ADR 008).
 - **Remote product images.** `imageUrl` is an arbitrary URL an admin typed, with no
   upload endpoint or validation; rendering it would widen the CSP and leak page URLs to
-  whatever host was pasted. Products get a deterministic lettered tile from the SKU.
+  whatever host was pasted. Products get a lettered tile of their initials instead.
 - **Server-side rendering.** Everything worth rendering is behind a memory-held token,
   and SSR would force the cookie-based session this platform has no endpoint for.
 - **Optimistic updates.** Every write waits for the server; invalidation is fast and

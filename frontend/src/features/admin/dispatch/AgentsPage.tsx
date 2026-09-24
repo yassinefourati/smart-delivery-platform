@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useState, type FormEvent } from 'react';
+import { Link, useSearchParams } from 'react-router';
 
 import { Field } from '../../../components/Field';
 import { Loading } from '../../../components/Loading';
@@ -13,7 +14,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function AgentsPage() {
   const queryClient = useQueryClient();
-  const [form, setForm] = useState({ userId: '', name: '', phone: '' });
+  // The Users page links here with ?userId= once it has granted DELIVERY_AGENT.
+  const [params] = useSearchParams();
+  const [form, setForm] = useState({ userId: params.get('userId') ?? '', name: '', phone: '' });
   const agents = useQuery({
     queryKey: queryKeys.dispatch.agents(),
     queryFn: ({ signal }) => listAgents({ signal }),
@@ -61,8 +64,9 @@ export function AgentsPage() {
       <form className={`${ui.form} ${ui.card}`} onSubmit={submit} aria-label="New agent">
         <h2>New agent</h2>
         <p className={`${ui.small} ${ui.muted}`}>
-          Paste the user&apos;s id: the platform has no user search. The user must already hold the
-          DELIVERY_AGENT role, and no endpoint can grant it yet.
+          The user must hold the DELIVERY_AGENT role to see and complete their deliveries.{' '}
+          <Link to="/admin/users">Find them by email on the Users page</Link> to grant it and get
+          their user id.
         </p>
         <Field label="User id" error={badId ? 'This does not look like a user id (a UUID).' : null}>
           {(p) => (

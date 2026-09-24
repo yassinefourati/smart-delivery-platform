@@ -115,6 +115,27 @@ const cases: readonly EndpointCase[] = [
     call: () => api.updateUser(USER_ID, { firstName: 'A', lastName: 'B' }),
   },
   {
+    label: 'lookupUserByEmail',
+    method: 'GET',
+    pathname: '/api/v1/users/lookup',
+    body: USER_RESPONSE,
+    call: () => api.lookupUserByEmail('a@b.test'),
+  },
+  {
+    label: 'grantRole',
+    method: 'PUT',
+    pathname: `/api/v1/users/${USER_ID}/roles/DELIVERY_AGENT`,
+    body: USER_RESPONSE,
+    call: () => api.grantRole(USER_ID, 'DELIVERY_AGENT'),
+  },
+  {
+    label: 'revokeRole',
+    method: 'DELETE',
+    pathname: `/api/v1/users/${USER_ID}/roles/DELIVERY_AGENT`,
+    body: USER_RESPONSE,
+    call: () => api.revokeRole(USER_ID, 'DELIVERY_AGENT'),
+  },
+  {
     label: 'listAddresses',
     method: 'GET',
     pathname: `/api/v1/users/${USER_ID}/addresses`,

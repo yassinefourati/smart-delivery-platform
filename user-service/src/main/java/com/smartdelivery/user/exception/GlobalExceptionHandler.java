@@ -22,9 +22,14 @@ public class GlobalExceptionHandler extends PlatformExceptionHandler {
         return build(HttpStatus.CONFLICT, "EMAIL_ALREADY_EXISTS", ex.getMessage(), request);
     }
 
-    @ExceptionHandler({UserNotFoundException.class, AddressNotFoundException.class})
+    @ExceptionHandler({UserNotFoundException.class, UserEmailNotFoundException.class, AddressNotFoundException.class})
     public ResponseEntity<ProblemDetail> handleNotFound(RuntimeException ex, HttpServletRequest request) {
         return build(HttpStatus.NOT_FOUND, "NOT_FOUND", ex.getMessage(), request);
+    }
+
+    @ExceptionHandler(CannotRevokeOwnAdminException.class)
+    public ResponseEntity<ProblemDetail> handleOwnAdmin(CannotRevokeOwnAdminException ex, HttpServletRequest request) {
+        return build(HttpStatus.CONFLICT, "CANNOT_REVOKE_OWN_ADMIN", ex.getMessage(), request);
     }
 
     @ExceptionHandler({InvalidCredentialsException.class, InvalidServiceClientException.class})

@@ -113,6 +113,15 @@ const dispatch = {
 } as const;
 
 /**
+ * Admin user management. Keyed by the email that was looked up, since that is what the endpoint
+ * takes; ADMIN-only, so these entries only exist in an admin session.
+ */
+const users = {
+  all: () => ['users'] as const,
+  byEmail: (email: string) => ['users', 'byEmail', email] as const,
+} as const;
+
+/**
  * An agent's own worklist.
  *
  * Keyed by the AGENT'S USER ID, because that is literally what the endpoint takes:
@@ -132,6 +141,7 @@ export const queryKeys = {
   orders,
   account,
   dispatch,
+  users,
   deliveries,
 } as const;
 

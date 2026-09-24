@@ -59,8 +59,9 @@ state (plenty, "only N left", out of stock), 3 customers with addresses, and one
 each, which the saga takes to "waiting for a courier" on its own. It is safe to re-run --
 it skips what exists, and the orders carry a fixed `Idempotency-Key`, so a second run
 replays them rather than placing more. `SEED_ORDERS=0` skips the orders; the customers
-sign in with `demo-password-123`. It creates no delivery agents, because no endpoint can
-grant the `DELIVERY_AGENT` role.
+sign in with `demo-password-123`. It creates no delivery agents: to deliver an order, an
+admin grants a user `DELIVERY_AGENT` on the **Users** page, creates their agent profile on
+**Agents**, and assigns the shipment. The agent then signs in and marks it delivered.
 
 ```bash
 docker compose up -d --build && scripts/seed-demo-data.sh
