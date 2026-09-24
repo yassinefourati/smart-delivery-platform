@@ -1,0 +1,99 @@
+/* Help: questions on the left, the problem report on the right. */
+.layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr);
+  gap: var(--sdp-space-6);
+  align-items: start;
+}
+.faq {
+  display: grid;
+  gap: var(--sdp-space-2);
+}
+.faq h2,
+.report h2 {
+  font-size: var(--sdp-text-lg);
+  margin: 0 0 var(--sdp-space-2);
+}
+.question {
+  background: var(--sdp-bg-raised);
+  border: 1px solid var(--sdp-border);
+  border-radius: var(--sdp-radius-md);
+}
+.question summary {
+  cursor: pointer;
+  padding: var(--sdp-space-3) var(--sdp-space-4);
+  font-weight: 600;
+  list-style-position: inside;
+}
+.question summary::marker {
+  color: var(--sdp-accent);
+}
+.question[open] summary {
+  border-bottom: 1px solid var(--sdp-border);
+}
+.question p {
+  margin: 0;
+  padding: var(--sdp-space-3) var(--sdp-space-4) var(--sdp-space-4);
+  color: var(--sdp-text-muted);
+}
+
+.report {
+  display: grid;
+  gap: var(--sdp-space-3);
+}
+.report p {
+  margin: 0;
+}
+.activity {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--sdp-border);
+  border-radius: var(--sdp-radius-md);
+  max-height: 26rem;
+  overflow-y: auto;
+}
+.entry {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: var(--sdp-space-3);
+  align-items: baseline;
+  padding: var(--sdp-space-2) var(--sdp-space-3);
+  border-bottom: 1px solid var(--sdp-border);
+  font-size: var(--sdp-text-sm);
+}
+.entry:last-child {
+  border-bottom: 0;
+}
+.when {
+  color: var(--sdp-text-muted);
+  font-variant-numeric: tabular-nums;
+}
+.what {
+  display: grid;
+  min-width: 0;
+}
+.code {
+  font-family: var(--sdp-font-mono);
+  font-size: var(--sdp-text-xs);
+  color: var(--sdp-text-muted);
+  overflow-wrap: anywhere;
+}
+/* Words first; the colour only reinforces them. */
+.outcome {
+  font-weight: 600;
+  white-space: nowrap;
+}
+.outcome[data-outcome='ok'] {
+  color: var(--sdp-success);
+}
+.outcome[data-outcome='problem'],
+.outcome[data-outcome='unreachable'] {
+  color: var(--sdp-danger);
+}
+
+@media (width < 52rem) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

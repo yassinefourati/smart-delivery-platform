@@ -198,7 +198,7 @@ export function AppShell() {
       <footer className={styles.footer}>
         <div className={styles.footerInner}>
           <span className={styles.footerBrand}>Smart Delivery</span>
-          <Link to="/support">Having trouble? Get a support report</Link>
+          <Link to="/support">Help and support</Link>
         </div>
       </footer>
     </>
